@@ -33,7 +33,7 @@ How to use it is in `README.md`.
 | file | role |
 |---|---|
 | `build_gold.py` | Human-labelled validation set from the human review; frame strata; the as-built predictions. |
-| `gold/`, `predictions/` | Its output: 69 gold papers, strata population, as-built codes. |
+| `gold/`, `predictions/` | Its output: 69 valid papers, strata population, as-built codes. |
 | `run_pipeline.sh` | The pipeline run unattended on the gold papers: `prepare` once, `classify <model>` per model. |
 | `baseline.py` | LLM baselines (Anthropic SDK, or any OpenAI-compatible endpoint): full text plus class definitions, or the pipeline prompt as an ablation. |
 | `evaluate.py` | Accuracy, kappa, PABAK, F1, reweighted accuracy, McNemar + bootstrap + Holm, manual-effort and cost tables. |
