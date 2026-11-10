@@ -11,18 +11,16 @@ How to use it is in `README.md`.
 | path | why it is necessary |
 |---|---|
 | `dap/collect.py` | **New.** Stage 0: harvests any subject from OpenAlex (`--subject`, `--search-in`, `--year-min/max`, `--filter`); resumable; records the query. |
-| `dap/schema.py` | The only vocabulary (scheme 2.0.1). Gained `Arm.UNSPECIFIED`, the default for new corpora. |
+| `dap/schema.py` | The only vocabulary (scheme 2.0.1). |
 | `dap/sources.py`, `verify.py`, `store.py`, `batch.py` | Retrieval, link verification, SQLite state, Message Batches. Release change: the contact address is optional and sent only to Crossref and Unpaywall, never in a User-Agent. |
 | `dap/redact.py` | **New.** Masks addresses and keys in error text before it is stored (`Store.fail`) or raised (`sources._get`). |
 | `dap/classify.py` | Constrained classification. Release changes: prompt `v2.3.0` (subject-neutral, no arm in the message; no coding rule changed); `tool_choice: auto` and more output room on models that reject forced tool use (Opus 5.5, Sonnet 5.5, Fable 5.1/5.2); a price table for current models so `--budget` can stop them. |
 | `dap/pipeline.py` | The CLI. Release changes: `collect` subcommand; `--arm-map`/`--arm` removed; `enrol --year-max` no longer defaults to 2025; `--model` pins the model in `--mode api`; `DAP_TEXT_CACHE` saves the exact retrieved text (benchmark only). |
 | `tests/` | 297 offline tests: the research suite (guards, integration, pipeline) plus `test_release.py` for the changes above. |
-| `requirements.txt` | Dependencies, minimum versions (matplotlib dropped with `plots.py`). |
+| `requirements.txt` | Dependencies, minimum versions. |
 | `requirements.lock` | **New.** The exact versions both test suites passed with on a fresh Python 3.12 install, 10 Nov 2026. |
-| `dap_frame.sqlite` | The case-study state: 41,395 papers. Copied with SQLite's backup API from the 28 Oct version. On 10 Nov 2026 the contact addresses in 357 `failures.message` rows were replaced with `<redacted>` by `dap/redact.py`, and the file was vacuumed; nothing else changed. The original in `scraper/` still holds them. |
-| `keyword_qc_papers.csv`, `keyword_arms.py` | The case study's scope: the 38,539-row enrol input and the title-keyword rule that selected it. |
+| `keyword_arms.py` | The case study's scope: the 38,539-row enrol input and the title-keyword rule that selected it. `keyword_qc_papers.csv` is built by the script.|
 | `scratch/h.py`, `scratch/chk.py` | Manual mode: decided-rule record builders, and the gate to run before any `--import`. |
-| `review_issues.md` | The decision log (S1–S220). |
 | `../CLAUDE.md` | The rules the case study was run under. |
 
 ## Post-analysis: `post-analysis/`
