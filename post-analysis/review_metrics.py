@@ -145,7 +145,7 @@ def per_stratum(scored, labels):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("csv", nargs="?", default=str(HERE / "merged.csv"))
+    ap.add_argument("csv", nargs="?", default=str(HERE / "human_review.csv"))
     ap.add_argument("--out", default=str(HERE / "review_results"))
     ap.add_argument("--merge", action="append", default=[], metavar="FROM=TO",
                     help="sensitivity run: score case FROM as case TO on both sides "

@@ -456,9 +456,9 @@ load();
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("csv", nargs="?", default=str(HERE / "merged.csv"))
+    ap.add_argument("csv", nargs="?", default=str(HERE / "human_review.csv"))
     ap.add_argument("--port", type=int, default=8765)
-    ap.add_argument("--db", default=str(HERE.parent / "data_availability_pipeline" / "v2" / "dap_frame.sqlite"),
+    ap.add_argument("--db", default=str(HERE.parent / "dap_final.sqlite"),
                     help="pipeline database to read copies and passages from (read-only)")
     args = ap.parse_args()
     store = Store(Path(args.csv).resolve(), Path(args.db).resolve())
