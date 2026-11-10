@@ -1,0 +1,8 @@
+benchmark/texts/*
+openalex_papers.csv
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+data_availability_pipeline/v2/keyword_qc_papers.csv
+.pytest_cache/
+benchmark/runs/*
