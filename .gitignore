@@ -6,3 +6,4 @@ openalex_papers.csv
 data_availability_pipeline/v2/keyword_qc_papers.csv
 .pytest_cache/
 benchmark/runs/*
+.DS_Store
