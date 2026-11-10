@@ -480,7 +480,7 @@ confidence for a baseline. The report gives:
 ### A gold set for another subject
 
 The included gold set is quantum computing. A claim about another field needs
-gold labels from that field:
+human-verified labels from that field:
 
 1. Run the pipeline on the subject.
 2. Draw a stratified sample with `frame_result.py`.
