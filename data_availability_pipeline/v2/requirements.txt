@@ -1,0 +1,8 @@
+anthropic>=0.40
+requests>=2.31
+pandas>=2.0
+pymupdf>=1.24          # primary PDF text extraction
+pdfplumber>=0.11       # fallback only
+beautifulsoup4>=4.12
+lxml>=5.0
+pytest>=8.0        # tests/ only
