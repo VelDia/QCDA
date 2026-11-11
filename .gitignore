@@ -1,6 +1,9 @@
 benchmark/texts/*
 openalex_papers.csv
 *.sqlite
+# stripped copies (meta_json.passages removed) are committed; originals stay local
+!dap_final_stripped.sqlite
+!dap_classical_stripped.sqlite
 *.sqlite-shm
 *.sqlite-wal
 data_availability_pipeline/v2/keyword_qc_papers.csv
