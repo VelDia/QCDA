@@ -1,6 +1,6 @@
 """Blind human review of classifier output, one paper at a time.
 
-    ../data_availability_pipeline/.venv/bin/python review_app.py [merged.csv] [--port 8765]
+    ../data_availability_pipeline/.venv/bin/python review_app.py [human_review.csv] [--port 8765]
 
 Serves a coding form at http://127.0.0.1:8765. Each save writes these columns
 back into the CSV (atomically; a one-time copy of the original is kept as

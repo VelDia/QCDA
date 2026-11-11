@@ -1,8 +1,8 @@
 """Build the gold set (and the as-built pipeline predictions) from the human review.
 
     python build_gold.py
-    python build_gold.py --review ../post-analysis/merged.csv \
-        --db ../data_availability_pipeline/v2/dap_frame.sqlite --out gold
+    python build_gold.py --review ../post-analysis/human_review.csv \
+        --db ../dap_final.sqlite --out gold
 
 Writes:
   gold/frame_review.csv       one row per human-reviewed paper: the human's two

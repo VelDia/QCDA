@@ -363,7 +363,7 @@ check.
 |---|---|
 | Harvest | OpenAlex `search="quantum computing"` with `filter=concepts.id:C121332964` (the OpenAlex concept "Quantum computing"), snapshot of 3 Sep 2026: 544,156 works (`openalex_papers.csv`). It was made by one of the research repository's `collect_quantum_data*.py` scripts; which one is not recorded, but all of them send this search and filter. The same request through this pipeline is `collect --subject "quantum computing" --search-in fulltext --filter concepts.id:C121332964`. OpenAlex's index has moved since, so it does not redraw the same 544,156 rows (on 10 Nov 2026 it counted 649,850 up to 3 Sep 2026): the CSV is the record of the corpus |
 | Scope | the title-keyword rule `kw-1` (`data_availability_pipeline/v2/keyword_arms.py`) keeps 38,539 quantum computing papers (`keyword_qc_papers.csv`); the 5,647-paper venue frame of 15 quantum journals was enrolled first |
-| State | `data_availability_pipeline/v2/dap_frame.sqlite`: 41,395 papers enrolled, 19,415 fully processed (`status` lists the rest) |
+| State | `dap_final.sqlite`: 41,395 papers enrolled, 19,415 fully processed (`status` lists the rest) |
 | Coding window | 2021–2026; 2026 is a partial year by construction |
 | Decisions | every ruling on how a case applies is logged in `data_availability_pipeline/v2/review_issues.md` and stamped on the rows it affects (`scheme_version`, `prompt_version`) |
 
@@ -377,11 +377,11 @@ To get one result per paper and draw a stratified sample for human review:
 
 ```bash
 cd post-analysis
-python frame_result.py ../data_availability_pipeline/v2/dap_frame.sqlite -o frame_samples \
+python frame_result.py ../dap_final.sqlite -o frame_samples \
     --random_source random_category --n 10                  # up to 10 papers per result, one CSV each
 python -c "import glob, pandas as pd; pd.concat(pd.read_csv(f) for f in sorted(glob.glob('frame_samples/result_*.csv'))).to_csv('review.csv', index=False)"
 python review_app.py review.csv \
-    --db ../data_availability_pipeline/v2/dap_frame.sqlite     # blind review form at http://127.0.0.1:8765
+    --db ../dap_final.sqlite     # blind review form at http://127.0.0.1:8765
 python review_metrics.py review.csv --out review_results    # classifier vs. human
 ```
 
@@ -520,6 +520,7 @@ Any CSV with `openalex_id`, `gold_a` and `gold_b` (case tokens) works as
 README.md                      this file
 MANIFEST.md                    every file and why it is here
 openalex_papers.csv            the quantum computing harvest
+dap_final.sqlite               the case-study state
 data_availability_pipeline/
   CLAUDE.md                    the working rules the case study was run under
   v2/dap/                      the pipeline (collect.py, schema.py, sources.py, classify.py,
@@ -527,7 +528,6 @@ data_availability_pipeline/
   v2/tests/                    offline test suite
   v2/scratch/h.py, chk.py      manual-mode record builders and the pre-import gate
   v2/keyword_arms.py           the case study's title-keyword scope rule
-  v2/dap_frame.sqlite          the case-study state
   v2/review_issues.md          the decision log
 post-analysis/                 one result per paper, sampling, blind review app, review metrics
 benchmark/                     gold set, baselines, pipeline runner, evaluation

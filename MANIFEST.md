@@ -27,7 +27,7 @@ How to use it is in `README.md`.
 | file | role |
 |---|---|
 | `review_app.py` | The blind human-review form (never shows the classifier's codes). |
-| `review_metrics.py`, `merged.csv` | Classifier against the 70-paper human review. |
+| `review_metrics.py`, `human_review.csv` | Classifier against the 70-paper human review. |
 
 ## Benchmark: `benchmark/` (new)
 | file | role |

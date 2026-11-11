@@ -1,6 +1,6 @@
 """Human review vs classifier: export the human codes and score the classifier.
 
-    ../data_availability_pipeline/.venv/bin/python review_metrics.py [merged.csv] [--out review_results]
+    ../data_availability_pipeline/.venv/bin/python review_metrics.py [human_review.csv] [--out review_results]
 
 The human code is the reference (true), the classifier's stored code is the
 prediction. Axis A (external data) and axis B (self-generated data) answer

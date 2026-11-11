@@ -46,7 +46,7 @@ from dap.pipeline import _assemble, _summary
 from dap.classify import Usage, _norm, grounding_text
 from dap.schema import Arm, Retrieval, TextSource, SchemaError
 
-DB = sys.argv[3] if len(sys.argv) > 3 else "dap_frame.sqlite"
+DB = sys.argv[3] if len(sys.argv) > 3 else "../../dap_final.sqlite"
 
 prompts, metas = {}, {}
 for line in open(sys.argv[1]):
