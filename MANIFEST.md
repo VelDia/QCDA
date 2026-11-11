@@ -11,7 +11,7 @@ How to use it is in `README.md`.
 | path | why it is necessary |
 |---|---|
 | `dap/collect.py` | **New.** Stage 0: harvests any subject from OpenAlex (`--subject`, `--search-in`, `--year-min/max`, `--filter`); resumable; records the query. |
-| `dap/schema.py` | The only vocabulary (scheme 2.0.1). |
+| `dap/schema.py` | The only vocabulary (scheme 2.3.0). |
 | `dap/sources.py`, `verify.py`, `store.py`, `batch.py` | Retrieval, link verification, SQLite state, Message Batches. Release change: the contact address is optional and sent only to Crossref and Unpaywall, never in a User-Agent. |
 | `dap/redact.py` | **New.** Masks addresses and keys in error text before it is stored (`Store.fail`) or raised (`sources._get`). |
 | `dap/classify.py` | Constrained classification. Release changes: prompt `v2.3.0` (subject-neutral, no arm in the message; no coding rule changed); `tool_choice: auto` and more output room on models that reject forced tool use (Opus 5.5, Sonnet 5.5, Fable 5.1/5.2); a price table for current models so `--budget` can stop them. |

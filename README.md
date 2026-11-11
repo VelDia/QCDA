@@ -1,13 +1,10 @@
 # QCDA: where do research papers keep their data?
 
-QCDA is a pipeline that takes a research subject, collects the papers published
-on it, and records for each paper whether the data it uses or produces can
-actually be reached, and how. It ships with a full run on **quantum computing**
-(41,395 papers enrolled), which is the case study, and with the benchmark that
-compares the pipeline to plain LLM classification.
-
-The subject is an input parameter. Nothing after the first step depends on the
-field.
+QCDA is a pipeline that takes a field of research as input, collects the papers 
+published on the topic via OpenAlex, and records for each paper whether the data 
+it uses or produces can actually be reached, and how. 
+We have tested it on **quantum computing** (41,395 papers enrolled), 
+and with the benchmark that compares the pipeline to plain LLM classification.
 
 ---
 
@@ -18,25 +15,25 @@ Every paper is coded on two independent axes:
 - **Axis A, external data.** Data that existed before the paper and that the
   paper analyses: a dataset, a benchmark, real-world records, prior artifacts.
 - **Axis B, self-generated data.** Data the paper produced itself: measurements,
-  simulation output, generated instances, training runs.
+  simulation output, generated instances, training runs, its own collected data.
 
 Each axis gets exactly one of seven cases:
 
 | # | token | meaning |
 |---|---|---|
-| 1 | `not_applicable` | the axis does not apply: no external data analysed (A), nothing generated (B) |
+| 1 | `not_applicable` | the axis does not apply: no data analysed (A) or generated (B) |
 | 2 | `openly_accessible` | a concrete identifier is given (DOI, URL, accession, repository) |
 | 3 | `access_not_provided` | the material is identifiable, but no route to it is given |
 | 4 | `insufficiently_specified` | the material cannot even be identified |
-| 5 | `access_unresolvable` | a route is given, and it fails when checked |
-| 6 | `on_request` | offered on contact |
+| 5 | `access_unresolvable` | a route is given, and it cannot be reached when checked |
+| 6 | `on_request` | offered upon reasonable request through contacting the authors |
 | 7 | `explicitly_restricted` | stated that it cannot be shared |
 
 Case 5 is never asserted from text. Only the verification step writes it, after
 the link has actually been checked.
 
-Alongside the cases, every row records the identifiers found and the verbatim
-quotes that justify each decision. Each quote is checked against the paper's
+Alongside the cases, every row records the identifiers found and the quotes as evidence 
+that justify each decision. Each quote is checked against the paper's
 text before the row is stored. Every row also records a confidence level and a
 `needs_human_review` flag.
 
@@ -48,7 +45,7 @@ collect → enrol → metadata → retrieve → classify → verify → export
 
 | stage | what it does |
 |---|---|
-| `collect` | queries OpenAlex for your subject and writes the corpus CSV |
+| `collect` | searches OpenAlex for your query and writes the corpus CSV |
 | `enrol` | loads the CSV into the database, filters by year, removes duplicate DOIs |
 | `metadata` | fetches OpenAlex, Crossref and DataCite records; checks every cited DOI against DataCite |
 | `retrieve` | finds a legal full-text copy (publisher TDM, open-access locations, arXiv, Unpaywall), checks it is the right paper and complete, and cuts it to the passages about data |
@@ -56,16 +53,16 @@ collect → enrol → metadata → retrieve → classify → verify → export
 | `verify` | resolves every identifier the classifier recorded; a dead, paywalled or login-gated route becomes `access_unresolvable` |
 | `export` | writes `analysis.csv`, `evidence.csv`, `review_queue.csv` from the database |
 
-Everything lives in one SQLite file (`das.sqlite` below). Every stage is
-resumable: stop it, run the same command again, and it continues where it
-stopped. Running a stage twice never redoes finished papers.
+Everything lives in one SQLite file (`das.sqlite` below). Every stage is resumable: 
+stop it, run the same command again, and it continues where it stopped. 
+Running a stage twice never redoes finished papers, unless recoding is intended.
 
 ---
 
-## Run it on your own subject
+## Run it on your own topic
 
-The steps below take a subject from nothing to classified papers in
-`das.sqlite`. They were run as written on 10 Nov 2026, from a fresh install
+The steps below take a topic and store the classification results and dataset links in
+`das.sqlite`. They were tested as written on 10 Nov 2026, from a fresh install
 with no keys set, on a 25-paper pilot (the step 3 command with
 `--max-papers 25`); the timings and counts quoted come from that run. With no
 `ANTHROPIC_API_KEY`, that run stopped at classification: a live `--mode api`
@@ -121,7 +118,7 @@ address works as well as a personal one. When it is unset, every stage prints
 one line saying so; that line is not an error.
 
 Every command below names the database with `--db das.sqlite`. `--db` goes
-**before** the command (`python -m dap.pipeline --db das.sqlite stage ...`).
+before the command (`python -m dap.pipeline --db das.sqlite stage ...`).
 Leave it out and the database is `dap.sqlite` in the current directory.
 
 ### 3. Collect the corpus
@@ -131,8 +128,9 @@ python -m dap.pipeline collect --subject "protein folding" \
     --year-min 2021 --year-max 2026 --filter type:article --out corpus.csv
 ```
 
-- `--subject` takes OpenAlex search syntax: `"exact phrase"`, `AND`, `OR`, `NOT`.
-  A subject searched in titles or abstracts may not contain a comma; use `OR`.
+- `--subject` is a topic of interest or the research field. 
+It takes OpenAlex search syntax: `"exact phrase"`, `AND`, `OR`, `NOT`. 
+A subject searched in titles or abstracts may not contain a comma; use `OR`.
 - `--search-in` is `title` (narrowest), `title_and_abstract` (default) or
   `fulltext` (broadest, noisy).
 - `--filter` adds any OpenAlex filter. `type:article` is worth keeping: without
@@ -361,7 +359,7 @@ check.
 
 | | |
 |---|---|
-| Harvest | OpenAlex `search="quantum computing"` with `filter=concepts.id:C121332964` (the OpenAlex concept "Quantum computing"), snapshot of 3 Sep 2026: 544,156 works (`openalex_papers.csv`). It was made by one of the research repository's `collect_quantum_data*.py` scripts; which one is not recorded, but all of them send this search and filter. The same request through this pipeline is `collect --subject "quantum computing" --search-in fulltext --filter concepts.id:C121332964`. OpenAlex's index has moved since, so it does not redraw the same 544,156 rows (on 10 Nov 2026 it counted 649,850 up to 3 Sep 2026): the CSV is the record of the corpus |
+| Harvest | OpenAlex `search="quantum computing"` with `filter=concepts.id:C121332964` (the OpenAlex concept "Quantum computing"), snapshot of 3 Sep 2026: 544,156 works (`openalex_papers.csv`). The same request through this pipeline is `collect --subject "quantum computing" --search-in fulltext --filter concepts.id:C121332964`. OpenAlex's index has moved since, so it does not redraw the same 544,156 rows (on 10 Nov 2026 it counted 649,850 up compared to 3 Sep 2026): the CSV is the record of the corpus |
 | Scope | the title-keyword rule `kw-1` (`data_availability_pipeline/v2/keyword_arms.py`) keeps 38,539 quantum computing papers (`keyword_qc_papers.csv`); the 5,647-paper venue frame of 15 quantum journals was enrolled first |
 | State | `dap_final.sqlite`: 41,395 papers enrolled, 19,415 fully processed (`status` lists the rest) |
 | Coding window | 2021–2026; 2026 is a partial year by construction |
@@ -370,7 +368,7 @@ check.
 This corpus was classified in **manual mode**, with an agent as the classifier
 behind the same validation gate. Each row records its coder in `model_id`.
 Human adjudications are recorded as `human:<name>`. Report rates **by year
-band**: 853 papers coded before the window was narrowed to 2021 are still in
+band**: 853 papers coded before the window was narrowed to 2021-2026 are still in
 the database.
 
 To get one result per paper and draw a stratified sample for human review:
@@ -477,12 +475,12 @@ confidence for a baseline. The report gives:
 - The share of papers whose text was found with no human step.
 - API cost from recorded tokens, and time.
 
-### A gold set for another subject
+### A gold set for validation
 
 The included gold set is quantum computing. A claim about another field needs
 human-verified labels from that field:
 
-1. Run the pipeline on the subject.
+1. Run the pipeline on the `subject` (topic of interest).
 2. Draw a stratified sample with `frame_result.py`.
 3. Have a person code it blind in `review_app.py`.
 4. Point `build_gold.py --review <csv> --db <db>` at the result.
@@ -506,10 +504,9 @@ Any CSV with `openalex_id`, `gold_a` and `gold_b` (case tokens) works as
 ## Data you can and cannot redistribute
 
 - `openalex_papers.csv` is OpenAlex metadata (CC0).
-- The case-study database's `failures` log once held the contact addresses of
-  the people who ran it, inside the URLs of failed Unpaywall lookups. They were
-  replaced with `<redacted>` on 10 Nov 2026 (357 rows) and the file was vacuumed;
-  new failures are redacted as they are written.
+- The case-study database's `failures` log is stripped from the contact addresses of
+  the people who ran it, inside the URLs of failed Unpaywall lookups. They are
+  replaced with `<redacted>`; new failures are redacted as they are written.
 - The SQLite databases and `benchmark/texts/` contain **excerpts and full
   texts of publisher articles**. Keep them local. Publish the exported codes
   and short evidence quotes, not the database.
