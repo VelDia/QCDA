@@ -8,13 +8,17 @@ production, at scale, spending money.
     python3 tests/test_integration.py
 """
 
+from __future__ import annotations
+
 import copy
 import csv
 import json
 import sqlite3
 import sys
 import threading
+from collections.abc import Callable
 from pathlib import Path
+from typing import TYPE_CHECKING, NoReturn
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -31,6 +35,12 @@ from dap.classify import ClassificationError, classify, select_passages, should_
 from dap.schema import SCHEME_VERSION, Actual, Arm, Case, RepoType, Retrieval, TextSource
 from dap.sources import Config, CrossrefFacts, arxiv_id_from_openalex, looks_like_article
 from dap.store import MAX_ATTEMPTS, Store
+
+if TYPE_CHECKING:
+    from dap.classify import Usage
+    from dap.schema import Evidence, PaperRecord
+    from dap.sources import FullText
+
 from fakes import (
     CROSSREF_BARE,
     CROSSREF_WITH_DAS,
@@ -55,7 +65,17 @@ CFG = Config(contact_email="researcher@institution.edu")
 # ===========================================================================
 # sources.crossref_facts — the layer that was at 0% coverage
 # ===========================================================================
-def _with_get(routes, fn):
+def _with_get(routes: dict, fn: Callable[[], object]) -> object:
+    """Run a function with `sources._get` answering from fixtures.
+
+    Args:
+        routes: Maps a substring of the URL to a `FakeResponse` or to an
+            exception to raise (see `fake_get_factory`).
+        fn: The function to run.
+
+    Returns:
+        Whatever `fn` returns.
+    """
     original = sources._get
     sources._get = fake_get_factory(routes)
     try:
@@ -64,7 +84,7 @@ def _with_get(routes, fn):
         sources._get = original
 
 
-def test_das_found_under_an_unguessable_assertion_name():
+def test_das_found_under_an_unguessable_assertion_name() -> None:
     f = _with_get(
         {"api.crossref.org": FakeResponse(CROSSREF_WITH_DAS)},
         lambda: sources.crossref_facts(CFG, "10.1038/x"),
@@ -74,7 +94,7 @@ def test_das_found_under_an_unguessable_assertion_name():
     assert "Zenodo repository" in f.das_texts[0]
 
 
-def test_non_das_assertions_are_not_mistaken_for_a_statement():
+def test_non_das_assertions_are_not_mistaken_for_a_statement() -> None:
     f = _with_get(
         {"api.crossref.org": FakeResponse(CROSSREF_WITH_DAS)},
         lambda: sources.crossref_facts(CFG, "10.1038/x"),
@@ -83,7 +103,7 @@ def test_non_das_assertions_are_not_mistaken_for_a_statement():
     assert "2023-08-01" not in joined and "2024-01-15" not in joined
 
 
-def test_only_dataset_relations_are_collected():
+def test_only_dataset_relations_are_collected() -> None:
     f = _with_get(
         {"api.crossref.org": FakeResponse(CROSSREF_WITH_DAS)},
         lambda: sources.crossref_facts(CFG, "10.1038/x"),
@@ -94,7 +114,7 @@ def test_only_dataset_relations_are_collected():
     assert all("arXiv" not in d for d in f.dataset_ids)
 
 
-def test_only_text_mining_links_are_kept():
+def test_only_text_mining_links_are_kept() -> None:
     f = _with_get(
         {"api.crossref.org": FakeResponse(CROSSREF_WITH_DAS)},
         lambda: sources.crossref_facts(CFG, "10.1038/x"),
@@ -103,7 +123,7 @@ def test_only_text_mining_links_are_kept():
     assert "springer" in f.tdm_links[0]["url"]
 
 
-def test_references_are_captured_for_datacite_confirmation():
+def test_references_are_captured_for_datacite_confirmation() -> None:
     f = _with_get(
         {"api.crossref.org": FakeResponse(CROSSREF_WITH_DAS)},
         lambda: sources.crossref_facts(CFG, "10.1038/x"),
@@ -112,7 +132,7 @@ def test_references_are_captured_for_datacite_confirmation():
     assert "10.1103/physrevlett.100.100501" in f.dataset_refs  # lowercased
 
 
-def test_bare_crossref_record_yields_nothing_but_does_not_crash():
+def test_bare_crossref_record_yields_nothing_but_does_not_crash() -> None:
     f = _with_get(
         {"api.crossref.org": FakeResponse(CROSSREF_BARE)},
         lambda: sources.crossref_facts(CFG, "10.1145/1"),
@@ -121,7 +141,7 @@ def test_bare_crossref_record_yields_nothing_but_does_not_crash():
     assert f.container == "Proceedings of ISCA" and f.published_year == 2022
 
 
-def test_missing_crossref_record_is_not_an_error():
+def test_missing_crossref_record_is_not_an_error() -> None:
     f = _with_get(
         {"api.crossref.org": sources.PermanentError("HTTP 404")},
         lambda: sources.crossref_facts(CFG, "10.0/nope"),
@@ -129,7 +149,7 @@ def test_missing_crossref_record_is_not_an_error():
     assert f.found is False
 
 
-def test_empty_doi_short_circuits():
+def test_empty_doi_short_circuits() -> None:
     assert sources.crossref_facts(CFG, "").found is False
 
 
@@ -142,7 +162,7 @@ def test_empty_doi_short_circuits():
 # which holds a complete record. Asking only Crossref discarded a paper that was
 # fully described at the other agency.
 # ---------------------------------------------------------------------------
-def test_datacite_registered_paper_is_not_treated_as_having_no_metadata():
+def test_datacite_registered_paper_is_not_treated_as_having_no_metadata() -> None:
     f = _with_get(
         {
             "api.crossref.org": sources.PermanentError("HTTP 404"),
@@ -155,7 +175,7 @@ def test_datacite_registered_paper_is_not_treated_as_having_no_metadata():
     assert f.published_year == 2019
 
 
-def test_crossref_is_preferred_and_datacite_not_called_when_it_answers():
+def test_crossref_is_preferred_and_datacite_not_called_when_it_answers() -> None:
     f = _with_get(
         {"api.crossref.org": FakeResponse(CROSSREF_BARE)},
         lambda: sources.registry_facts(CFG, "10.1145/1"),
@@ -165,7 +185,7 @@ def test_crossref_is_preferred_and_datacite_not_called_when_it_answers():
     assert f.found and f.container == "Proceedings of ISCA"
 
 
-def test_datacite_fallback_reads_das_and_related_dois():
+def test_datacite_fallback_reads_das_and_related_dois() -> None:
     f = _with_get(
         {
             "api.crossref.org": sources.PermanentError("HTTP 404"),
@@ -179,7 +199,7 @@ def test_datacite_fallback_reads_das_and_related_dois():
     assert f.license_urls == ["http://creativecommons.org/licenses/by/4.0"]
 
 
-def test_datacite_abstract_is_never_mistaken_for_a_das():
+def test_datacite_abstract_is_never_mistaken_for_a_das() -> None:
     """An abstract is not a data-availability statement. Promoting one would put
     a fabricated DAS in front of the classifier.
     """
@@ -193,7 +213,7 @@ def test_datacite_abstract_is_never_mistaken_for_a_das():
     assert not any("lattice surgery" in t for t in f.das_texts)
 
 
-def test_both_agencies_missing_still_reports_not_found():
+def test_both_agencies_missing_still_reports_not_found() -> None:
     f = _with_get(
         {
             "api.crossref.org": sources.PermanentError("HTTP 404"),
@@ -204,10 +224,10 @@ def test_both_agencies_missing_still_reports_not_found():
     assert f.found is False, "genuine absence must still be a failure"
 
 
-def test_registry_facts_normalises_a_resolver_prefixed_doi():
+def test_registry_facts_normalises_a_resolver_prefixed_doi() -> None:
     seen = {}
 
-    def _spy(cfg, url, **kw):
+    def _spy(cfg: Config, url: str, **kw: object) -> NoReturn:
         seen["url"] = url
         raise sources.PermanentError("HTTP 404")
 
@@ -221,12 +241,13 @@ def test_registry_facts_normalises_a_resolver_prefixed_doi():
     assert seen["url"].endswith("10.1038/x")
 
 
-def _clear_dc_cache():
+def _clear_dc_cache() -> None:
+    """Empty the module-level DataCite cache, so tests do not share verdicts."""
     with sources._dc_lock:
         sources._dc_cache.clear()
 
 
-def test_datacite_distinguishes_dataset_from_article():
+def test_datacite_distinguishes_dataset_from_article() -> None:
     _clear_dc_cache()
     got = _with_get(
         {
@@ -251,11 +272,11 @@ def test_datacite_distinguishes_dataset_from_article():
 # serialised through a 5 qps per-host bucket -> ~12 minutes, 0 datasets found.
 # These pin the properties that make the bulk form safe to substitute.
 # ---------------------------------------------------------------------------
-def test_many_dois_resolve_in_one_request():
+def test_many_dois_resolve_in_one_request() -> None:
     _clear_dc_cache()
     calls = []
 
-    def counting(cfg, url, **kw):
+    def counting(cfg: Config, url: str, **kw: object) -> FakeResponse:
         calls.append(kw.get("params", {}).get("query", ""))
         return FakeResponse(
             datacite_bulk(
@@ -278,11 +299,11 @@ def test_many_dois_resolve_in_one_request():
     assert set(got) == {"10.5281/zenodo.1"}, "only the dataset-typed DOI counts"
 
 
-def test_repeat_dois_are_not_refetched():
+def test_repeat_dois_are_not_refetched() -> None:
     _clear_dc_cache()
     calls = []
 
-    def counting(cfg, url, **kw):
+    def counting(cfg: Config, url: str, **kw: object) -> FakeResponse:
         calls.append(url)
         return FakeResponse(datacite_bulk(("10.5281/zenodo.1", DATACITE_DATASET_ATTRS)))
 
@@ -298,11 +319,11 @@ def test_repeat_dois_are_not_refetched():
     assert set(again) == {"10.5281/zenodo.1"}, "cache returns the same verdict"
 
 
-def test_duplicates_within_one_call_are_collapsed():
+def test_duplicates_within_one_call_are_collapsed() -> None:
     _clear_dc_cache()
     seen = []
 
-    def counting(cfg, url, **kw):
+    def counting(cfg: Config, url: str, **kw: object) -> FakeResponse:
         seen.append(kw.get("params", {}).get("query", ""))
         return FakeResponse(datacite_bulk(("10.5281/zenodo.1", DATACITE_DATASET_ATTRS)))
 
@@ -315,13 +336,13 @@ def test_duplicates_within_one_call_are_collapsed():
     assert seen[0].count("10.5281/zenodo.1") == 1, "the DOI must appear once in the query"
 
 
-def test_datacite_outage_is_not_cached_as_not_a_dataset():
+def test_datacite_outage_is_not_cached_as_not_a_dataset() -> None:
     """A transient failure must leave the DOI unresolved so a rerun retries it.
     Caching an outage as a negative would silently lose Axis A evidence.
     """
     _clear_dc_cache()
 
-    def failing(cfg, url, **kw):
+    def failing(cfg: Config, url: str, **kw: object) -> NoReturn:
         raise sources.TransientError("HTTP 503")
 
     original = sources._get
@@ -335,11 +356,11 @@ def test_datacite_outage_is_not_cached_as_not_a_dataset():
         assert "10.5281/zenodo.1" not in sources._dc_cache, "outage must not poison cache"
 
 
-def test_batches_are_chunked():
+def test_batches_are_chunked() -> None:
     _clear_dc_cache()
     calls = []
 
-    def counting(cfg, url, **kw):
+    def counting(cfg: Config, url: str, **kw: object) -> FakeResponse:
         calls.append(kw.get("params", {}).get("query", ""))
         return FakeResponse(datacite_bulk())
 
@@ -352,11 +373,11 @@ def test_batches_are_chunked():
     assert len(calls) == 3, f"120 DOIs at chunk=50 should be 3 requests, got {len(calls)}"
 
 
-def test_doi_that_could_break_out_of_the_query_is_dropped():
+def test_doi_that_could_break_out_of_the_query_is_dropped() -> None:
     _clear_dc_cache()
     calls = []
 
-    def counting(cfg, url, **kw):
+    def counting(cfg: Config, url: str, **kw: object) -> FakeResponse:
         calls.append(kw.get("params", {}).get("query", ""))
         return FakeResponse(datacite_bulk())
 
@@ -372,7 +393,7 @@ def test_doi_that_could_break_out_of_the_query_is_dropped():
 
 
 # -- the wrong-paper bug from v1 --------------------------------------------
-def test_arxiv_id_comes_from_metadata_not_a_title_search():
+def test_arxiv_id_comes_from_metadata_not_a_title_search() -> None:
     assert arxiv_id_from_openalex(OPENALEX_ARXIV) == "2401.12345v2"
     assert arxiv_id_from_openalex(OPENALEX_NO_ARXIV) is None
 
@@ -381,38 +402,96 @@ def test_arxiv_id_comes_from_metadata_not_a_title_search():
 # verify — the layer that could never produce a failure in v1
 # ===========================================================================
 class _FakeRequests:
+    """A stand-in for the `requests` module as `verify.py` uses it.
+
+    Attributes:
+        RequestException: The real exception type, so
+            `except requests.RequestException` still binds.
+        head_calls: The number of HEAD requests made.
+        get_calls: The number of GET requests made.
+        urls: Every URL asked for, in order.
+    """
+
     # the real exception type, so `except requests.RequestException` still binds
     import requests as _real
 
     RequestException = _real.RequestException
 
-    def __init__(self, head=None, get=None, routes=None):
-        """`routes`, like fakes.fake_get_factory, maps a substring of the URL to
+    def __init__(
+        self,
+        head: FakeResponse | Exception | None = None,
+        get: FakeResponse | Exception | None = None,
+        routes: dict | None = None,
+    ) -> None:
+        """Script the answers.
+
+        `routes`, like fakes.fake_get_factory, maps a substring of the URL to
         a FakeResponse or an Exception, and serves both HEAD and GET; a URL no
         route matches gets `head`/`get`. Every URL asked for is in `urls`.
+
+        Args:
+            head: The answer to a HEAD request no route matches.
+            get: The answer to a GET request no route matches.
+            routes: The answers by URL substring, for HEAD and GET alike.
         """
         self._head, self._get = head, get
         self._routes = routes or {}
         self.head_calls = self.get_calls = 0
         self.urls: list[str] = []
 
-    def _answer(self, url, default):
+    def _answer(self, url: str, default: FakeResponse | Exception | None) -> FakeResponse | None:
+        """Record a URL and find its scripted answer.
+
+        Args:
+            url: The URL asked for.
+            default: The answer to give if no route matches.
+
+        Returns:
+            The scripted response. A scripted exception is raised instead.
+        """
         self.urls.append(url)
         resp = next((r for needle, r in self._routes.items() if needle in url), default)
         if isinstance(resp, Exception):
             raise resp
         return resp
 
-    def head(self, url, **kw):
+    def head(self, url: str, **kw: object) -> FakeResponse | None:
+        """Answer a HEAD request.
+
+        Args:
+            url: The URL asked for.
+            **kw: The request options; ignored.
+
+        Returns:
+            The scripted response.
+        """
         self.head_calls += 1
         return self._answer(url, self._head)
 
-    def get(self, url, **kw):
+    def get(self, url: str, **kw: object) -> FakeResponse | None:
+        """Answer a GET request.
+
+        Args:
+            url: The URL asked for.
+            **kw: The request options; ignored.
+
+        Returns:
+            The scripted response.
+        """
         self.get_calls += 1
         return self._answer(url, self._get)
 
 
-def _with_requests(fake, fn):
+def _with_requests(fake: _FakeRequests, fn: Callable[[], object]) -> object:
+    """Run a function with `verify.requests` replaced by a fake.
+
+    Args:
+        fake: The stand-in for the `requests` module.
+        fn: The function to run.
+
+    Returns:
+        Whatever `fn` returns.
+    """
     original = verify.requests
     verify.requests = fake
     try:
@@ -421,13 +500,13 @@ def _with_requests(fake, fn):
         verify.requests = original
 
 
-def test_clean_200_is_accessible():
+def test_clean_200_is_accessible() -> None:
     fake = _FakeRequests(head=FakeResponse(status=200, headers={"Content-Type": "application/zip"}))
     r = _with_requests(fake, lambda: verify.verify_identifier(CFG, "https://zenodo.org/records/1"))
     assert r.status is Actual.ACCESSIBLE and fake.get_calls == 0
 
 
-def test_head_refusal_falls_back_to_get():
+def test_head_refusal_falls_back_to_get() -> None:
     """A repository that refuses HEAD is not a broken link. v1 called this
     requires_authentication and moved on.
     """
@@ -439,13 +518,13 @@ def test_head_refusal_falls_back_to_get():
     assert r.status is Actual.ACCESSIBLE and fake.get_calls == 1
 
 
-def test_dead_doi_is_not_found():
+def test_dead_doi_is_not_found() -> None:
     fake = _FakeRequests(head=FakeResponse(status=404))
     r = _with_requests(fake, lambda: verify.verify_identifier(CFG, "10.5281/zenodo.999999999"))
     assert r.status is Actual.NOT_FOUND and r.http_status == 404
 
 
-def test_intermittent_403_host_does_not_establish_an_access_requirement():
+def test_intermittent_403_host_does_not_establish_an_access_requirement() -> None:
     """gitlab.com answers automated requests with 403 during some periods and
     200 during others: two identifiers recorded `accessible` 200 in the corpus
     both returned 403 when re-checked, while a browser loaded the public
@@ -464,7 +543,7 @@ def test_intermittent_403_host_does_not_establish_an_access_requirement():
     assert verify.derive_case(Case.OPENLY_ACCESSIBLE, r.status)[0] is Case.OPENLY_ACCESSIBLE
 
 
-def test_a_403_anywhere_else_still_gates_access():
+def test_a_403_anywhere_else_still_gates_access() -> None:
     """The soft-403 list is narrow on purpose: a publisher's
     supplementary-material endpoint that answers 403 is a real credential wall
     and must keep promoting.
@@ -481,7 +560,7 @@ def test_a_403_anywhere_else_still_gates_access():
     assert verify.derive_case(Case.OPENLY_ACCESSIBLE, r.status)[0] is Case.ACCESS_UNRESOLVABLE
 
 
-def test_soft_404_host_does_not_establish_absence():
+def test_soft_404_host_does_not_establish_absence() -> None:
     """Kaggle answers an automated request with 404 whether or not the dataset
     exists -- all 15 kaggle.com identifiers in the corpus came back 404, among
     them datasets with thousands of upvotes that load fine in a browser. Only a
@@ -499,7 +578,7 @@ def test_soft_404_host_does_not_establish_absence():
     assert verify.derive_case(Case.OPENLY_ACCESSIBLE, r.status)[0] is Case.OPENLY_ACCESSIBLE
 
 
-def test_a_404_anywhere_else_still_establishes_absence():
+def test_a_404_anywhere_else_still_establishes_absence() -> None:
     """The soft-404 list is narrow on purpose: a host only joins it once its
     404s are shown to be indiscriminate.
     """
@@ -511,7 +590,7 @@ def test_a_404_anywhere_else_still_establishes_absence():
     assert verify.derive_case(Case.OPENLY_ACCESSIBLE, r.status)[0] is Case.ACCESS_UNRESOLVABLE
 
 
-def test_resolving_landing_page_with_no_data_is_caught():
+def test_resolving_landing_page_with_no_data_is_caught() -> None:
     """The case v1 structurally could not see: HTTP 200, but nothing there."""
     html = "<html><body>This record has been withdrawn by the depositor.</body></html>"
     fake = _FakeRequests(
@@ -521,7 +600,7 @@ def test_resolving_landing_page_with_no_data_is_caught():
     assert r.status is Actual.RESOLVES_NO_DATA
 
 
-def test_login_wall_is_paywalled_not_accessible():
+def test_login_wall_is_paywalled_not_accessible() -> None:
     html = "<html><body>Please sign in to continue. Purchase access.</body></html>"
     fake = _FakeRequests(
         head=FakeResponse(status=200, headers={"Content-Type": "text/html"}, text=html)
@@ -530,7 +609,7 @@ def test_login_wall_is_paywalled_not_accessible():
     assert r.status is Actual.PAYWALLED
 
 
-def test_network_error_is_error_not_missing():
+def test_network_error_is_error_not_missing() -> None:
     import requests as _r
 
     fake = _FakeRequests(head=_r.RequestException("boom"))
@@ -538,13 +617,16 @@ def test_network_error_is_error_not_missing():
     assert r.status is Actual.ERROR
 
 
-def test_non_resolvable_identifier_is_not_applicable():
+def test_non_resolvable_identifier_is_not_applicable() -> None:
     r = verify.verify_identifier(CFG, "Supplementary Table 3")
     assert r.status is Actual.NOT_APPLICABLE
 
 
-def test_aggregate_takes_the_worst_case():
-    mk = lambda s: verify.VerificationResult("i", s)
+def test_aggregate_takes_the_worst_case() -> None:
+
+    def mk(s: Actual) -> verify.VerificationResult:
+        return verify.VerificationResult("i", s)
+
     assert verify.aggregate([mk(Actual.ACCESSIBLE), mk(Actual.NOT_FOUND)]) is Actual.NOT_FOUND
     assert verify.aggregate([mk(Actual.ACCESSIBLE), mk(Actual.ACCESSIBLE)]) is Actual.ACCESSIBLE
     assert verify.aggregate([]) is Actual.NOT_ATTEMPTED
@@ -554,7 +636,19 @@ def test_aggregate_takes_the_worst_case():
 # ===========================================================================
 # classify — constrained output, and the self-correction loop
 # ===========================================================================
-def _classify(client, payload_passages=None):
+def _classify(
+    client: FakeAnthropic, payload_passages: list[dict] | None = None
+) -> tuple[PaperRecord, Usage]:
+    """Classify a stock paper with a scripted client.
+
+    Args:
+        client: The scripted client.
+        payload_passages: The passages shown to the model; None uses a stock
+            passage that grounds the quotes of `good_payload`.
+
+    Returns:
+        A tuple `(record, usage)`, as `classify` returns it.
+    """
     return classify(
         client,
         model="fake-model",
@@ -591,7 +685,7 @@ def _classify(client, payload_passages=None):
     )
 
 
-def test_valid_payload_becomes_a_validated_record():
+def test_valid_payload_becomes_a_validated_record() -> None:
     client = FakeAnthropic([FakeMessage([FakeBlock(good_payload())])])
     rec, usage = _classify(client)
     assert rec.axis_b.case.value is Case.OPENLY_ACCESSIBLE
@@ -603,7 +697,7 @@ def test_valid_payload_becomes_a_validated_record():
     assert rec.axis_b.actual.value is Actual.NOT_ATTEMPTED
 
 
-def test_tool_use_is_forced():
+def test_tool_use_is_forced() -> None:
     client = FakeAnthropic([FakeMessage([FakeBlock(good_payload())])])
     _classify(client)
     kw = client.calls[0]
@@ -611,7 +705,7 @@ def test_tool_use_is_forced():
     assert kw["tools"][0]["input_schema"]["required"]
 
 
-def test_schema_violation_is_handed_back_and_corrected():
+def test_schema_violation_is_handed_back_and_corrected() -> None:
     """The retry loop: an invalid first answer produces a tool_result error
     containing the validator's own complaint, and the second answer is kept.
     """
@@ -632,7 +726,7 @@ def test_schema_violation_is_handed_back_and_corrected():
     assert usage.input_tokens == 2000, "both attempts are billed and counted"
 
 
-def test_persistently_invalid_output_raises_rather_than_writing_garbage():
+def test_persistently_invalid_output_raises_rather_than_writing_garbage() -> None:
     bad = good_payload()
     bad["axis_b"]["case"]["value"] = "fully_open"  # not in the vocabulary
     client = FakeAnthropic([FakeMessage([FakeBlock(bad, f"t{i}")]) for i in range(3)])
@@ -640,13 +734,13 @@ def test_persistently_invalid_output_raises_rather_than_writing_garbage():
         _classify(client)
 
 
-def test_truncated_output_is_an_error_not_a_partial_record():
+def test_truncated_output_is_an_error_not_a_partial_record() -> None:
     client = FakeAnthropic([FakeMessage([FakeBlock(good_payload())], stop_reason="max_tokens")])
     with pytest.raises(ClassificationError, match="max_tokens"):
         _classify(client)
 
 
-def test_prose_only_answer_is_retried():
+def test_prose_only_answer_is_retried() -> None:
     client = FakeAnthropic(
         [
             FakeMessage([FakeTextBlock()], stop_reason="end_turn"),
@@ -658,7 +752,7 @@ def test_prose_only_answer_is_retried():
     assert len(client.calls) == 2
 
 
-def test_escalation_triggers():
+def test_escalation_triggers() -> None:
     client = FakeAnthropic([FakeMessage([FakeBlock(good_payload())])])
     rec, _ = _classify(client)
     assert should_escalate(rec) is False
@@ -675,7 +769,7 @@ def test_escalation_triggers():
     assert should_escalate(rec) is True
 
 
-def test_crossref_das_reaches_the_prompt_as_authoritative():
+def test_crossref_das_reaches_the_prompt_as_authoritative() -> None:
     client = FakeAnthropic([FakeMessage([FakeBlock(good_payload())])])
     _classify(client)
     msg = client.calls[0]["messages"][0]["content"]
@@ -683,7 +777,7 @@ def test_crossref_das_reaches_the_prompt_as_authoritative():
     assert "deposited by the publisher" in msg
 
 
-def test_no_passages_prompt_says_the_text_is_missing():
+def test_no_passages_prompt_says_the_text_is_missing() -> None:
     msg = C._build_user_message(
         title="T", venue="V", year=2024, arm=Arm.QUANTUM_COMPUTING, crossref_summary={}, passages=[]
     )
@@ -697,7 +791,7 @@ def test_no_passages_prompt_says_the_text_is_missing():
 # route on_request with the restriction recorded as a token, so identical NDA
 # wording was stored at 6 on one paper and 7 on another.
 # ---------------------------------------------------------------------------
-def test_nda_statement_is_explicitly_restricted_and_passes_the_gate():
+def test_nda_statement_is_explicitly_restricted_and_passes_the_gate() -> None:
     prompt = " ".join(C.SYSTEM_PROMPT.split())  # the prompt wraps lines
     rule = prompt.split("`on_request` vs `explicitly_restricted`")[1].split(
         "`openly_accessible` requires"
@@ -757,7 +851,15 @@ _NO_DATA = "No datasets were generated or analysed during the current study"
 _BENCH = "We train and evaluate the hybrid classifier on the MNIST benchmark"
 
 
-def _no_data_payload(axis_b):
+def _no_data_payload(axis_b: dict) -> dict:
+    """Build a payload for a paper that carries a "no data" statement.
+
+    Args:
+        axis_b: The Axis B object to put in the payload.
+
+    Returns:
+        The classification payload.
+    """
     payload = good_payload()
     payload["evidence"] = [
         {"id": 1, "quote": _NO_DATA, "section": "Data availability", "locator": ""},
@@ -801,7 +903,15 @@ def _no_data_payload(axis_b):
     return payload
 
 
-def _classify_no_data(payload):
+def _classify_no_data(payload: dict) -> PaperRecord:
+    """Classify a paper whose passage carries a "no data" statement.
+
+    Args:
+        payload: The classification the scripted model returns.
+
+    Returns:
+        The validated record.
+    """
     client = FakeAnthropic([FakeMessage([FakeBlock(payload)])])
     rec, _ = _classify(
         client,
@@ -819,7 +929,7 @@ def _classify_no_data(payload):
     return client, rec
 
 
-def test_no_data_statement_codes_axis_b_only_and_passes_the_gate():
+def test_no_data_statement_codes_axis_b_only_and_passes_the_gate() -> None:
     """S219/S220 (28 Oct 2026): an explicit no-data statement makes Axis B
     not_applicable even when results are reported, and leaves Axis A to the
     body -- here a named benchmark the statement says nothing about.
@@ -873,7 +983,7 @@ def test_no_data_statement_codes_axis_b_only_and_passes_the_gate():
     assert rec.prompt_version == "v2.3.0"
 
 
-def test_h_no_data_statement_builder_passes_the_gate():
+def test_h_no_data_statement_builder_passes_the_gate() -> None:
     """The batch builder for the ruling must produce what the gate accepts, so
     a manual batch cannot drift back to coding the output access_not_provided.
     """
@@ -899,7 +1009,7 @@ def test_h_no_data_statement_builder_passes_the_gate():
 # "confidence=high requires an evidence_id", and land a confident code on a
 # paper whose text was never retrieved. That is how v1 produced unusable output.
 # ---------------------------------------------------------------------------
-def test_quote_fabricated_from_the_title_is_rejected():
+def test_quote_fabricated_from_the_title_is_rejected() -> None:
     payload = copy.deepcopy(good_payload())
     payload["evidence"] = [
         {
@@ -921,7 +1031,7 @@ def test_quote_fabricated_from_the_title_is_rejected():
     assert "not present in the supplied passages" in str(e.value)
 
 
-def test_quote_absent_from_the_passages_is_rejected():
+def test_quote_absent_from_the_passages_is_rejected() -> None:
     payload = copy.deepcopy(good_payload())
     payload["evidence"][0]["quote"] = "all data are available on request from the authors"
     client = FakeAnthropic([FakeMessage([FakeBlock(payload)]) for _ in range(3)])
@@ -929,7 +1039,7 @@ def test_quote_absent_from_the_passages_is_rejected():
         _classify(client)
 
 
-def test_grounding_tolerates_whitespace_and_hyphenation():
+def test_grounding_tolerates_whitespace_and_hyphenation() -> None:
     """PDF extraction wraps lines mid-word and collapses oddly; a real verbatim
     quote must not be rejected over layout.
     """
@@ -941,7 +1051,7 @@ def test_grounding_tolerates_whitespace_and_hyphenation():
     C.check_evidence_grounded(ev, g)  # must not raise
 
 
-def test_a_quote_from_the_das_alone_is_grounded():
+def test_a_quote_from_the_das_alone_is_grounded() -> None:
     """The DAS is shown to the model, so quoting it is legitimate even with no
     passages at all.
     """
@@ -958,13 +1068,21 @@ def test_a_quote_from_the_das_alone_is_grounded():
 # ===========================================================================
 # store — resume, dedup, atomicity, version refusal
 # ===========================================================================
-def _store(tmp="/tmp/_dap_test.sqlite"):
+def _store(tmp: str = "/tmp/_dap_test.sqlite") -> Store:
+    """Create an empty store at a fixed temporary path.
+
+    Args:
+        tmp: The path of the database; an existing file is removed first.
+
+    Returns:
+        The store.
+    """
     Path(tmp).unlink(missing_ok=True)
     Path(tmp + "-wal").unlink(missing_ok=True)
     return Store(tmp)
 
 
-def test_enrol_is_idempotent():
+def test_enrol_is_idempotent() -> None:
     s = _store()
     rows = [
         {"openalex_id": "W1", "doi": "a", "arm": "quantum_computing"},
@@ -975,7 +1093,7 @@ def test_enrol_is_idempotent():
     assert s.counts() == {"pending": 2}
 
 
-def test_duplicate_openalex_id_is_structurally_impossible():
+def test_duplicate_openalex_id_is_structurally_impossible() -> None:
     s = _store()
     s.enrol([{"openalex_id": "W1", "doi": "a", "arm": "other_cs"}])
     with sqlite3.connect(s.path) as c:
@@ -988,7 +1106,7 @@ def test_duplicate_openalex_id_is_structurally_impossible():
             pass
 
 
-def test_failed_papers_are_retried_then_parked():
+def test_failed_papers_are_retried_then_parked() -> None:
     """v1 retried forever and grew failures.csv without bound."""
     s = _store()
     s.enrol([{"openalex_id": "W1", "doi": "a", "arm": "other_cs"}])
@@ -998,7 +1116,7 @@ def test_failed_papers_are_retried_then_parked():
     assert s.pending() == [], "should stop being offered after MAX_ATTEMPTS"
 
 
-def test_permanent_failure_is_not_retried_at_all():
+def test_permanent_failure_is_not_retried_at_all() -> None:
     s = _store()
     s.enrol([{"openalex_id": "W1", "doi": "a", "arm": "other_cs"}])
     s.fail("W1", "retrieval", "PermanentError", "404", permanent=True)
@@ -1006,7 +1124,7 @@ def test_permanent_failure_is_not_retried_at_all():
     assert s.counts().get("dead") == 1
 
 
-def test_export_refuses_to_pool_scheme_versions():
+def test_export_refuses_to_pool_scheme_versions() -> None:
     """The single most dangerous silent corruption available to this project."""
     from fakes import good_payload  # noqa
 
@@ -1025,7 +1143,15 @@ def test_export_refuses_to_pool_scheme_versions():
         s.export_csv("/tmp/_x.csv")
 
 
-def _store_with_second_version(version):
+def _store_with_second_version(version: str) -> Store:
+    """Create a store with two finished papers, one under another version.
+
+    Args:
+        version: The scheme version to stamp on the second paper.
+
+    Returns:
+        The store.
+    """
     from fakes import good_payload  # noqa
 
     s = _store()
@@ -1052,7 +1178,7 @@ def _store_with_second_version(version):
     return s
 
 
-def test_export_pools_patch_versions_and_keeps_them_traceable():
+def test_export_pools_patch_versions_and_keeps_them_traceable() -> None:
     """A patch is a ruling on the same vocabulary: it pools, and each row says
     which version it was coded under.
     """
@@ -1066,19 +1192,19 @@ def test_export_pools_patch_versions_and_keeps_them_traceable():
     assert got == {"W1": SCHEME_VERSION, "W2": bumped}
 
 
-def test_export_refuses_a_minor_version_difference():
+def test_export_refuses_a_minor_version_difference() -> None:
     major, minor, _ = SCHEME_VERSION.split(".")
     s = _store_with_second_version(f"{major}.{int(minor) + 1}.0")
     with pytest.raises(RuntimeError, match="scheme versions"):
         s.export_csv("/tmp/_x_minor.csv")
 
 
-def test_concurrent_writes_do_not_corrupt():
+def test_concurrent_writes_do_not_corrupt() -> None:
     s = _store()
     ids = [f"W{i}" for i in range(60)]
     s.enrol([{"openalex_id": i, "doi": "", "arm": "other_cs"} for i in ids])
 
-    def work(i):
+    def work(i: str) -> None:
         client = FakeAnthropic([FakeMessage([FakeBlock(good_payload())])])
         rec, _ = _classify(client)
         rec.openalex_id = i
@@ -1092,7 +1218,7 @@ def test_concurrent_writes_do_not_corrupt():
     assert s.counts().get("done") == 60
 
 
-def test_export_round_trips_tokens():
+def test_export_round_trips_tokens() -> None:
     import csv
 
     s = _store()
@@ -1135,7 +1261,19 @@ ARTICLE_HTML = (
 STUB_HTML = b"<html><body><div id='redirect'>Loading...</div></body></html>"
 
 
-def _cascade(work, facts=None, routes=None):
+def _cascade(
+    work: dict, facts: CrossrefFacts | None = None, routes: dict | None = None
+) -> FullText:
+    """Run the retrieval cascade for a stock paper with faked responses.
+
+    Args:
+        work: The OpenAlex work object, which lists the locations.
+        facts: The paper's metadata facts; a bare found record by default.
+        routes: The faked responses (see `fake_get_factory`).
+
+    Returns:
+        What the cascade retrieved.
+    """
     facts = facts or CrossrefFacts(found=True)
     original = sources._get
     sources._get = fake_get_factory(routes or {})
@@ -1147,7 +1285,7 @@ def _cascade(work, facts=None, routes=None):
         sources._get = original
 
 
-def test_repository_location_is_tried_when_best_oa_is_a_dead_stub():
+def test_repository_location_is_tried_when_best_oa_is_a_dead_stub() -> None:
     work = {
         "best_oa_location": {"landing_page_url": "https://doi.org/10.1/x"},
         "locations": [
@@ -1169,13 +1307,13 @@ def test_repository_location_is_tried_when_best_oa_is_a_dead_stub():
     assert ft.url == "https://repository.example/paper.pdf"
 
 
-def test_a_url_is_never_fetched_twice_across_the_cascade():
+def test_a_url_is_never_fetched_twice_across_the_cascade() -> None:
     """best_oa_location is usually also present in `locations`; refetching it
     doubles the request count and the politeness cost for no new information.
     """
     calls = []
 
-    def counting(cfg, url, **kw):
+    def counting(cfg: Config, url: str, **kw: object) -> FakeResponse:
         calls.append(url)
         return FakeResponse(headers={"Content-Type": "text/html"}, content=STUB_HTML)
 
@@ -1198,7 +1336,7 @@ def test_a_url_is_never_fetched_twice_across_the_cascade():
     assert calls.count("https://pub.example/a.pdf") == 1, f"fetched {len(calls)} times"
 
 
-def test_best_oa_location_still_wins_when_it_works():
+def test_best_oa_location_still_wins_when_it_works() -> None:
     work = {
         "best_oa_location": {"pdf_url": "https://best.example/a.pdf"},
         "locations": [{"pdf_url": "https://other.example/b.pdf"}],
@@ -1225,19 +1363,19 @@ def test_best_oa_location_still_wins_when_it_works():
 # skipped entirely, and `Actual` came back `not_applicable` — the exact silent
 # pass verify.py exists to prevent.
 # ---------------------------------------------------------------------------
-def test_scheme_less_url_is_verified_not_skipped():
+def test_scheme_less_url_is_verified_not_skipped() -> None:
     assert verify._normalise("github.com/BBN-Q/APS2-Comms") == "https://github.com/BBN-Q/APS2-Comms"
     assert verify._normalise("zenodo.org/record/123") == "https://zenodo.org/record/123"
     assert verify._normalise("www.example.org/data") == "https://www.example.org/data"
 
 
-def test_doi_forms_normalise():
+def test_doi_forms_normalise() -> None:
     assert verify._normalise("10.5281/zenodo.51303") == "https://doi.org/10.5281/zenodo.51303"
     assert verify._normalise("doi:10.1038/nature23879") == "https://doi.org/10.1038/nature23879"
     assert verify._normalise("https://doi.org/10.1/x") == "https://doi.org/10.1/x"
 
 
-def test_prose_is_not_mistaken_for_a_locator():
+def test_prose_is_not_mistaken_for_a_locator() -> None:
     """The looser rule must not start fetching sentences. An unresolvable
     identifier is a real finding; a fabricated URL is a wrong one.
     """
@@ -1253,7 +1391,7 @@ def test_prose_is_not_mistaken_for_a_locator():
         assert verify._normalise(junk) == "", f"{junk!r} must not become a URL"
 
 
-def test_trailing_punctuation_is_stripped():
+def test_trailing_punctuation_is_stripped() -> None:
     assert verify._normalise("github.com/a/b.") == "https://github.com/a/b"
     assert verify._normalise("(zenodo.org/record/1)") == ""  # leading paren is not a host
 
@@ -1271,13 +1409,29 @@ def test_trailing_punctuation_is_stripped():
 # scheme'd one was fetched with %20 and 404'd.
 # ---------------------------------------------------------------------------
 class _NoWait:
-    def wait(self, url):
+    """A rate limiter that never waits."""
+
+    def wait(self, url: str) -> None:
+        """Return at once.
+
+        Args:
+            url: The URL about to be requested; ignored.
+        """
         pass
 
 
-def _with_routes(fake, fn):
-    """`_with_requests` without the per-host politeness delay: a repair makes
+def _with_routes(fake: _FakeRequests, fn: Callable[[], object]) -> object:
+    """Run a function with faked requests and no politeness delay.
+
+    `_with_requests` without the per-host politeness delay: a repair makes
     up to nine requests to one host.
+
+    Args:
+        fake: The stand-in for the `requests` module.
+        fn: The function to run.
+
+    Returns:
+        Whatever `fn` returns.
     """
     original = verify.LIMITER
     verify.LIMITER = _NoWait()
@@ -1293,13 +1447,21 @@ _DWAVE = "github.com/EnekoOsaba/DWAVE4TSP Clustering Multitasking"
 _DWAVE_FIXED = "https://github.com/EnekoOsaba/DWAVE4TSP_ClusteringMultitasking"
 
 
-def _ok(url):
+def _ok(url: str) -> FakeResponse:
+    """Build a 200 response for a repository page.
+
+    Args:
+        url: The final URL of the response.
+
+    Returns:
+        The response.
+    """
     return FakeResponse(
         status=200, headers={"Content-Type": "text/html"}, text="<html>repository</html>", url=url
     )
 
 
-def test_candidates_are_each_gap_underscore_or_nothing_all_underscore_first():
+def test_candidates_are_each_gap_underscore_or_nothing_all_underscore_first() -> None:
     got = [u for u, _ in verify._space_repairs("https://github.com/TNO- Quantum/qscore dwave")]
     assert got == [
         "https://github.com/TNO-_Quantum/qscore_dwave",
@@ -1309,7 +1471,7 @@ def test_candidates_are_each_gap_underscore_or_nothing_all_underscore_first():
     ]
 
 
-def test_candidates_touch_the_path_only_and_are_capped():
+def test_candidates_touch_the_path_only_and_are_capped() -> None:
     assert verify._space_repairs("https://x.org/a?q=b c") == []  # query, not path
     assert (
         verify._space_repairs("https://x.org/a  b")[0][0] == "https://x.org/a_b"
@@ -1319,7 +1481,7 @@ def test_candidates_touch_the_path_only_and_are_capped():
     assert verify._space_repairs("https://x.org/ab") == []
 
 
-def test_one_space_repaired_to_underscore():
+def test_one_space_repaired_to_underscore() -> None:
     fake = _FakeRequests(head=FakeResponse(status=404), routes={"quantum_tsp": _ok(_TSP_FIXED)})
     r = _with_routes(fake, lambda: verify.verify_identifier(CFG, _TSP))
     assert r.status is Actual.ACCESSIBLE and r.http_status == 200
@@ -1330,7 +1492,7 @@ def test_one_space_repaired_to_underscore():
     assert verify.derive_case(Case.OPENLY_ACCESSIBLE, r.status)[0] is Case.OPENLY_ACCESSIBLE
 
 
-def test_one_underscore_that_became_two_spaces_is_found():
+def test_one_underscore_that_became_two_spaces_is_found() -> None:
     """The DWAVE4TSP case: underscore, then nothing. A bare host with a space
     was NOT_APPLICABLE before; now it is checked.
     """
@@ -1347,7 +1509,7 @@ def test_one_underscore_that_became_two_spaces_is_found():
     assert len(fake.urls) == 5  # every candidate, for ambiguity
 
 
-def test_a_repair_that_redirects_names_the_candidate():
+def test_a_repair_that_redirects_names_the_candidate() -> None:
     """Live, 5 Oct: `TNO- Quantum/qscore dwave` repairs to
     `TNO-Quantum/qscore_dwave`, which GitHub forwards to `TNO-Quantum/qscore`.
     `final_url` is where the check landed; the note says how it got there, so a
@@ -1368,7 +1530,7 @@ def test_a_repair_that_redirects_names_the_candidate():
     )
 
 
-def test_two_candidates_resolving_is_ambiguous_and_nothing_is_picked():
+def test_two_candidates_resolving_is_ambiguous_and_nothing_is_picked() -> None:
     """BOHRTECHNOLOGY has two repositories starting with `quantum`: the shape
     that would otherwise be coded wrong without anyone seeing it.
     """
@@ -1386,7 +1548,7 @@ def test_two_candidates_resolving_is_ambiguous_and_nothing_is_picked():
     assert verify.derive_case(Case.OPENLY_ACCESSIBLE, r.status)[0] is Case.ACCESS_UNRESOLVABLE
 
 
-def test_no_candidate_resolving_leaves_the_result_as_today():
+def test_no_candidate_resolving_leaves_the_result_as_today() -> None:
     fake = _FakeRequests(head=FakeResponse(status=404))
     r = _with_routes(fake, lambda: verify.verify_identifier(CFG, _TSP))
     assert r == verify.VerificationResult(_TSP, Actual.NOT_FOUND, 404, "https://final.example/x")
@@ -1394,7 +1556,7 @@ def test_no_candidate_resolving_leaves_the_result_as_today():
     assert verify.derive_case(Case.OPENLY_ACCESSIBLE, r.status)[0] is Case.ACCESS_UNRESOLVABLE
 
 
-def test_a_403_generates_no_candidates():
+def test_a_403_generates_no_candidates() -> None:
     """A 403 means the path is probably right; retrying it wastes requests."""
     fake = _FakeRequests(
         head=FakeResponse(status=403),
@@ -1406,7 +1568,7 @@ def test_a_403_generates_no_candidates():
     assert fake.urls == [_TSP, _TSP]  # HEAD, GET; no candidate
 
 
-def test_a_soft_404_host_generates_no_candidates():
+def test_a_soft_404_host_generates_no_candidates() -> None:
     fake = _FakeRequests(head=FakeResponse(status=404), routes={"b_c": _ok("x")})
     r = _with_routes(
         fake, lambda: verify.verify_identifier(CFG, "https://www.kaggle.com/datasets/a/b c")
@@ -1414,7 +1576,7 @@ def test_a_soft_404_host_generates_no_candidates():
     assert r.status is Actual.ERROR and len(fake.urls) == 1
 
 
-def test_too_many_gaps_leaves_the_result_unchanged():
+def test_too_many_gaps_leaves_the_result_unchanged() -> None:
     ident = "https://github.com/a/b c d e f"
     fake = _FakeRequests(head=FakeResponse(status=404))
     r = _with_routes(fake, lambda: verify.verify_identifier(CFG, ident))
@@ -1422,7 +1584,7 @@ def test_too_many_gaps_leaves_the_result_unchanged():
     assert len(fake.urls) == 1
 
 
-def test_one_match_beside_an_unfinished_check_is_not_a_repair():
+def test_one_match_beside_an_unfinished_check_is_not_a_repair() -> None:
     """A candidate that timed out could be a second match."""
     import requests as _r
 
@@ -1435,7 +1597,7 @@ def test_one_match_beside_an_unfinished_check_is_not_a_repair():
     assert r.note == "repair not established: 1 of 2 candidates resolve, 1 could not be checked"
 
 
-def test_a_repaired_path_that_holds_nothing_still_promotes():
+def test_a_repaired_path_that_holds_nothing_still_promotes() -> None:
     """The repair finds the path; the check of that path still decides."""
     empty = FakeResponse(
         status=200,
@@ -1450,7 +1612,7 @@ def test_a_repaired_path_that_holds_nothing_still_promotes():
     assert verify.derive_case(Case.OPENLY_ACCESSIBLE, r.status)[0] is Case.ACCESS_UNRESOLVABLE
 
 
-def test_a_bare_host_with_a_space_is_checked_but_prose_still_is_not():
+def test_a_bare_host_with_a_space_is_checked_but_prose_still_is_not() -> None:
     assert verify._normalise("github.com/BOHRTECHNOLOGY/quantum tsp") == _TSP
     # the six space-bearing identifiers stored on 5 Oct are not locators
     # ...nor is prose with a host in it; the last one passes _BARE_HOST and is
@@ -1496,11 +1658,11 @@ BIBLIOGRAPHY = (
 PROSE = "We simulate the device and record the dataset for each run. " * 60
 
 
-def test_publisher_landing_page_is_not_article_text():
+def test_publisher_landing_page_is_not_article_text() -> None:
     assert looks_like_article(LANDING_PAGE, "Transmon readout fidelity improvements") is False
 
 
-def test_an_article_mentioning_one_chrome_phrase_is_still_accepted():
+def test_an_article_mentioning_one_chrome_phrase_is_still_accepted() -> None:
     """The threshold must not reject a real paper that happens to say
     'advertisement' or cite Google Scholar once.
     """
@@ -1537,7 +1699,7 @@ EPRINTS_RECORD = (
 )
 
 
-def test_a_repository_record_page_is_not_article_text():
+def test_a_repository_record_page_is_not_article_text() -> None:
     """The abstract is not the paper. A record page answers 'is there a data
     statement?' with a confident no, because it contains no body to look in.
     """
@@ -1567,7 +1729,7 @@ QIC_CONTENTS = (
 )
 
 
-def test_a_journal_contents_page_is_not_article_text():
+def test_a_journal_contents_page_is_not_article_text() -> None:
     assert len(QIC_CONTENTS.split()) > 400
     assert (
         looks_like_article(QIC_CONTENTS, "Optimizing the Number of Gates in Quantum Search")
@@ -1575,7 +1737,7 @@ def test_a_journal_contents_page_is_not_article_text():
     )
 
 
-def test_one_mention_of_an_editorial_board_does_not_reject_a_paper():
+def test_one_mention_of_an_editorial_board_does_not_reject_a_paper() -> None:
     """Nine real papers in the corpus say "editorial board" once, in an
     acknowledgement or a conflict-of-interest note.
     """
@@ -1586,7 +1748,7 @@ def test_one_mention_of_an_editorial_board_does_not_reject_a_paper():
     assert looks_like_article(text, "gate fidelity of the device") is True
 
 
-def test_the_record_check_passes_the_length_and_title_tests_it_backstops():
+def test_the_record_check_passes_the_length_and_title_tests_it_backstops() -> None:
     """Without the marker check these documents are indistinguishable from an
     article — which is why they were accepted for months.
     """
@@ -1607,7 +1769,7 @@ def test_the_record_check_passes_the_length_and_title_tests_it_backstops():
     )
 
 
-def test_an_article_whose_statement_names_a_repository_is_kept():
+def test_an_article_whose_statement_names_a_repository_is_kept() -> None:
     """The papers this study most cares about say 'institutional repository' in
     their data statement. Rejecting on that phrase would discard them.
     """
@@ -1618,31 +1780,39 @@ def test_an_article_whose_statement_names_a_repository_is_kept():
     assert looks_like_article(text, "") is True
 
 
-def test_bibliography_passages_are_dropped():
+def test_bibliography_passages_are_dropped() -> None:
     from dap.classify import _is_bibliography
 
     assert _is_bibliography(BIBLIOGRAPHY) is True
     assert _is_bibliography(PROSE) is False
 
 
-def test_a_paper_that_is_only_a_bibliography_yields_no_passages():
+def test_a_paper_that_is_only_a_bibliography_yields_no_passages() -> None:
     """Better to gate it for a human than to classify a reference list."""
     assert select_passages(BIBLIOGRAPHY) == []
 
 
-def test_article_prose_survives_the_bibliography_filter():
+def test_article_prose_survives_the_bibliography_filter() -> None:
     out = select_passages(PROSE + BIBLIOGRAPHY)
     assert out, "the prose half must still produce passages"
     assert all(not _is_bib(p["text"]) for p in out)
 
 
-def _is_bib(t):
+def _is_bib(t: str) -> bool:
+    """Call `classify._is_bibliography`.
+
+    Args:
+        t: The text to test.
+
+    Returns:
+        Whether the text reads as a reference list.
+    """
     from dap.classify import _is_bibliography
 
     return _is_bibliography(t)
 
 
-def test_a_short_citation_rich_snippet_is_not_called_a_bibliography():
+def test_a_short_citation_rich_snippet_is_not_called_a_bibliography() -> None:
     """Under 40 words there is not enough text to judge density."""
     from dap.classify import _is_bibliography
 
@@ -1661,7 +1831,7 @@ AUTHOR_YEAR_BIBLIOGRAPHY = (
 ) * 2
 
 
-def test_author_year_bibliography_is_detected():
+def test_author_year_bibliography_is_detected() -> None:
     """The first patterns assumed a numeric/abbreviated physics style, so an
     entire Springer author-year bibliography scored 81-87 and slipped under the
     threshold — it reached the classifier as though it were the paper.
@@ -1672,7 +1842,7 @@ def test_author_year_bibliography_is_detected():
     assert select_passages(AUTHOR_YEAR_BIBLIOGRAPHY) == []
 
 
-def test_prose_with_inline_author_year_citations_survives():
+def test_prose_with_inline_author_year_citations_survives() -> None:
     """Body text cites too. 'as Landauer (1961) showed' must not be mistaken for
     a reference list, or the widened patterns would delete the paper.
     """
@@ -1707,7 +1877,7 @@ INTERLEAVED_DAS = (
 )
 
 
-def test_availability_window_survives_the_bibliography_filter():
+def test_availability_window_survives_the_bibliography_filter() -> None:
     from dap.classify import _is_bibliography
 
     assert _is_bibliography(INTERLEAVED_DAS) is True, (
@@ -1718,7 +1888,7 @@ def test_availability_window_survives_the_bibliography_filter():
     assert any("upon reasonable request" in p["text"] for p in got)
 
 
-def test_a_bibliography_without_an_availability_heading_is_still_dropped():
+def test_a_bibliography_without_an_availability_heading_is_still_dropped() -> None:
     """The rescue is narrow: only an explicit availability heading earns it.
     A reference list that merely cites a GitHub URL stays out.
     """
@@ -1739,7 +1909,7 @@ THEORY = (
 )
 
 
-def test_a_keyword_free_paper_still_yields_structural_passages():
+def test_a_keyword_free_paper_still_yields_structural_passages() -> None:
     from dap.classify import structural_passages
 
     assert select_passages(THEORY) == [], "precondition: no keyword matches"
@@ -1748,7 +1918,7 @@ def test_a_keyword_free_paper_still_yields_structural_passages():
     assert all(p["text"] for p in got)
 
 
-def test_structural_passages_refuse_a_bibliography():
+def test_structural_passages_refuse_a_bibliography() -> None:
     """Otherwise this reintroduces exactly what the bibliography filter exists
     to stop: a reference list classified as though it were the paper.
     """
@@ -1776,7 +1946,7 @@ ACM_REFS = "\n".join(
 )
 
 
-def test_a_headed_reference_list_is_cut_and_the_appendix_after_it_kept():
+def test_a_headed_reference_list_is_cut_and_the_appendix_after_it_kept() -> None:
     from dap.classify import strip_bibliography
 
     text = BODY + "\nReferences\n" + ACM_REFS + "\nAppendix A: Proof of the bound\n" + BODY
@@ -1786,7 +1956,7 @@ def test_a_headed_reference_list_is_cut_and_the_appendix_after_it_kept():
     assert out.count("spectral gap") == 160, "no body line is lost"
 
 
-def test_an_author_year_list_under_the_density_bar_is_still_cut():
+def test_an_author_year_list_under_the_density_bar_is_still_cut() -> None:
     """The case the per-passage filter missed: a keyword ('simulation') in a
     cited title, in a list too sparse in citations to score as one.
     """
@@ -1797,7 +1967,7 @@ def test_an_author_year_list_under_the_density_bar_is_still_cut():
     assert select_passages(strip_bibliography(BODY + "\nREFERENCES\n" + ACM_REFS)) == []
 
 
-def test_a_statement_sharing_lines_with_references_survives_the_cut():
+def test_a_statement_sharing_lines_with_references_survives_the_cut() -> None:
     """Npj's two-column layout: the statement's lines carry reference entries
     from the next column.
     """
@@ -1813,7 +1983,7 @@ def test_a_statement_sharing_lines_with_references_survives_the_cut():
     assert "available upon" in out and "reasonable request" in out
 
 
-def test_a_contents_line_naming_references_does_not_start_the_cut():
+def test_a_contents_line_naming_references_does_not_start_the_cut() -> None:
     from dap.classify import strip_bibliography
 
     toc = "   References                                  17             A. Measurement Heat\n"
@@ -1821,7 +1991,7 @@ def test_a_contents_line_naming_references_does_not_start_the_cut():
     assert strip_bibliography(text).count("spectral gap") == 160
 
 
-def test_a_numbered_list_with_no_heading_is_cut_from_its_first_entry():
+def test_a_numbered_list_with_no_heading_is_cut_from_its_first_entry() -> None:
     from dap.classify import strip_bibliography
 
     refs = "\n".join(
@@ -1832,7 +2002,7 @@ def test_a_numbered_list_with_no_heading_is_cut_from_its_first_entry():
     assert "[1] A. Author" not in out and out.count("spectral gap") == 80
 
 
-def test_grobid_text_is_not_cut_again():
+def test_grobid_text_is_not_cut_again() -> None:
     """GROBID returns the body without its bibliography, and its section offsets
     index the text as given; removing lines would misplace every section.
     """
@@ -1861,7 +2031,7 @@ SPANISH_RECORD = (
 )
 
 
-def test_a_record_page_in_an_unknown_language_is_rejected():
+def test_a_record_page_in_an_unknown_language_is_rejected() -> None:
     from dap.sources import _RECORD_MARKERS, repeats_title_like_a_record
 
     assert sum(m in SPANISH_RECORD.lower() for m in _RECORD_MARKERS) < 2, (
@@ -1871,7 +2041,7 @@ def test_a_record_page_in_an_unknown_language_is_rejected():
     assert looks_like_article(SPANISH_RECORD, RECORD_TITLE) is False
 
 
-def test_a_paper_behind_a_repository_cover_sheet_is_kept():
+def test_a_paper_behind_a_repository_cover_sheet_is_kept() -> None:
     """HAL prints the title twice on its cover sheet ("To cite this version")
     right above the paper's own title page — a record's shape, on a real paper.
     """
@@ -1883,7 +2053,7 @@ def test_a_paper_behind_a_repository_cover_sheet_is_kept():
     assert looks_like_article(paper, RECORD_TITLE) is True
 
 
-def test_running_heads_do_not_make_a_paper_a_record():
+def test_running_heads_do_not_make_a_paper_a_record() -> None:
     page = ABSTRACT * 2
     paper = "".join(f"{RECORD_TITLE} Page {i} of 9 (2023) " + page for i in range(9))
     from dap.sources import repeats_title_like_a_record
@@ -1891,7 +2061,7 @@ def test_running_heads_do_not_make_a_paper_a_record():
     assert repeats_title_like_a_record(paper, RECORD_TITLE) is False
 
 
-def test_a_short_title_is_not_judged():
+def test_a_short_title_is_not_judged() -> None:
     from dap.sources import repeats_title_like_a_record
 
     assert (
@@ -1907,7 +2077,7 @@ def test_a_short_title_is_not_judged():
 # github.com/leporini/classification was extracted one character short and
 # could only ever verify as dead (review_issues S10; 58 coded papers).
 # ---------------------------------------------------------------------------
-def test_the_seven_latin_ligatures_are_folded_and_nothing_else():
+def test_the_seven_latin_ligatures_are_folded_and_nothing_else() -> None:
     from dap.sources import fold_ligatures
 
     assert fold_ligatures("classiﬁcation ﬀ ﬂ ﬃ ﬄ ﬅ ﬆ") == "classification ff fl ffi ffl st st"
@@ -1916,7 +2086,7 @@ def test_the_seven_latin_ligatures_are_folded_and_nothing_else():
     )
 
 
-def test_pdf_text_arrives_with_ligatures_folded(monkeypatch):
+def test_pdf_text_arrives_with_ligatures_folded(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         sources,
         "_extract_pdf_fast",
@@ -1926,7 +2096,7 @@ def test_pdf_text_arrives_with_ligatures_folded(monkeypatch):
     assert "github.com/leporini/classification" in text
 
 
-def test_a_quote_typed_without_the_ligature_matches_a_passage_stored_with_it():
+def test_a_quote_typed_without_the_ligature_matches_a_passage_stored_with_it() -> None:
     """Passages retrieved before the fold still carry the glyph."""
     from dap.classify import check_evidence_grounded, grounding_text
     from dap.schema import Evidence
@@ -1937,14 +2107,14 @@ def test_a_quote_typed_without_the_ligature_matches_a_passage_stored_with_it():
     check_evidence_grounded([Evidence(id=1, quote="github.com/leporini/classification")], g)
 
 
-def test_structural_passages_of_empty_text_are_empty():
+def test_structural_passages_of_empty_text_are_empty() -> None:
     from dap.classify import structural_passages
 
     assert structural_passages("") == []
     assert structural_passages("   ") == []
 
 
-def test_a_short_document_yields_only_an_opening():
+def test_a_short_document_yields_only_an_opening() -> None:
     from dap.classify import structural_passages
 
     got = structural_passages("A short note on lattice gauge theory. " * 5)
@@ -1963,7 +2133,7 @@ BIB_TAIL = "Shor, P. W. (1994). Phys. Rev. Lett. 41, 303. doi:10.1103/x. " * 40
 BODY_ONLY = "We measured the device and recorded the dataset for each run. " * 300
 
 
-def test_reference_count_is_collected_from_crossref():
+def test_reference_count_is_collected_from_crossref() -> None:
     f = _with_get(
         {
             "api.crossref.org": FakeResponse(
@@ -1982,18 +2152,18 @@ def test_reference_count_is_collected_from_crossref():
     assert f.reference_count == 74
 
 
-def test_text_without_a_bibliography_is_incomplete():
+def test_text_without_a_bibliography_is_incomplete() -> None:
     assert sources.text_is_complete(BODY_ONLY, 40) is False
     assert sources.text_is_complete(BODY_ONLY + BIB_TAIL, 40) is True
 
 
-def test_completeness_is_not_checked_when_few_references_are_deposited():
+def test_completeness_is_not_checked_when_few_references_are_deposited() -> None:
     """A paper with 3 deposited references tells us nothing; do not guess."""
     assert sources.text_is_complete(BODY_ONLY, 3) is True
     assert sources.text_is_complete("", 0) is True
 
 
-def test_truncated_source_is_rejected_and_the_cascade_continues():
+def test_truncated_source_is_rejected_and_the_cascade_continues() -> None:
     facts = CrossrefFacts(found=True)
     facts.reference_count = 60
     work = {
@@ -2022,7 +2192,7 @@ def test_truncated_source_is_rejected_and_the_cascade_continues():
     assert ft.url == "https://complete.example/b.pdf", "a truncated body must not end the cascade"
 
 
-def test_a_truncated_body_is_still_kept_when_nothing_better_exists():
+def test_a_truncated_body_is_still_kept_when_nothing_better_exists() -> None:
     """Incomplete text beats no text. It is returned, but marked."""
     facts = CrossrefFacts(found=True)
     facts.reference_count = 60
@@ -2069,7 +2239,7 @@ PREFERRED_THEN_ARXIV = {
 ARXIV_OK = FakeResponse(headers={"Content-Type": "text/html"}, content=ARTICLE_HTML)
 
 
-def test_a_throttled_preferred_copy_is_retried_not_replaced_by_the_preprint():
+def test_a_throttled_preferred_copy_is_retried_not_replaced_by_the_preprint() -> None:
     with pytest.raises(sources.TransientError, match="publisher.example"):
         _cascade(
             PREFERRED_THEN_ARXIV,
@@ -2080,7 +2250,7 @@ def test_a_throttled_preferred_copy_is_retried_not_replaced_by_the_preprint():
         )
 
 
-def test_a_throttled_copy_is_retried_when_nothing_else_is_readable():
+def test_a_throttled_copy_is_retried_when_nothing_else_is_readable() -> None:
     """Settling for no text is the same silent loss as settling for a preprint.
     The error must carry every location's outcome, or the failure row says
     nothing about what to retry.
@@ -2101,7 +2271,7 @@ def test_a_throttled_copy_is_retried_when_nothing_else_is_readable():
         )
 
 
-def test_a_refused_copy_still_falls_through_and_the_reason_is_kept():
+def test_a_refused_copy_still_falls_through_and_the_reason_is_kept() -> None:
     """A 403 is an answer, not weather. Rule 8: take the open copy instead."""
     ft = _cascade(
         PREFERRED_THEN_ARXIV,
@@ -2129,7 +2299,7 @@ problems untenable on conventional computers.</p></div>
 </body></text></TEI>"""
 
 
-def test_grobid_is_used_when_configured():
+def test_grobid_is_used_when_configured() -> None:
     cfg = Config(contact_email="a@b.edu", grobid_url="http://grobid.test")
     calls = []
 
@@ -2137,7 +2307,7 @@ def test_grobid_is_used_when_configured():
         status_code = 200
         content = TEI
 
-    def fake_post(url, **kw):
+    def fake_post(url: str, **kw: object) -> R:
         calls.append(url)
         return R()
 
@@ -2157,11 +2327,11 @@ def test_grobid_is_used_when_configured():
     assert text[off["DATA AVAILABILITY"] :].startswith("DATA AVAILABILITY")
 
 
-def test_grobid_failure_falls_back_rather_than_losing_the_paper():
+def test_grobid_failure_falls_back_rather_than_losing_the_paper() -> None:
     """A service that is down, slow or returns junk must not cost us the text."""
     cfg = Config(contact_email="a@b.edu", grobid_url="http://grobid.test")
 
-    def boom(url, **kw):
+    def boom(url: str, **kw: object) -> NoReturn:
         raise sources.requests.RequestException("connection refused")
 
     original = sources.requests.post
@@ -2172,10 +2342,10 @@ def test_grobid_failure_falls_back_rather_than_losing_the_paper():
         sources.requests.post = original
 
 
-def test_no_grobid_configured_means_no_network_call():
+def test_no_grobid_configured_means_no_network_call() -> None:
     cfg = Config(contact_email="a@b.edu")  # grobid_url empty
 
-    def boom(url, **kw):
+    def boom(url: str, **kw: object) -> NoReturn:
         raise AssertionError("must not call GROBID when it is not configured")
 
     original = sources.requests.post
@@ -2186,7 +2356,7 @@ def test_no_grobid_configured_means_no_network_call():
         sources.requests.post = original
 
 
-def test_pdf_extraction_falls_back_when_pymupdf_cannot_parse():
+def test_pdf_extraction_falls_back_when_pymupdf_cannot_parse() -> None:
     """A corrupt PDF must reach pdfplumber rather than raising."""
     assert isinstance(sources._extract_pdf_fast(b"not actually a pdf at all"), str)
     text, sections = sources._extract_pdf(b"not actually a pdf at all")
@@ -2201,7 +2371,7 @@ def test_pdf_extraction_falls_back_when_pymupdf_cannot_parse():
 # be reported against the section it demonstrably came from. `section` is what
 # the model claims; `locator` is derived by looking — the same rule as `Actual`.
 # ---------------------------------------------------------------------------
-def test_passages_are_tagged_with_their_section():
+def test_passages_are_tagged_with_their_section() -> None:
     text = (
         "INTRODUCTION\n"
         + "We study the device. " * 40
@@ -2213,14 +2383,14 @@ def test_passages_are_tagged_with_their_section():
     assert any(p["section"] == "DATA AVAILABILITY" for p in out)
 
 
-def test_passages_have_an_empty_section_without_structure():
+def test_passages_have_an_empty_section_without_structure() -> None:
     out = select_passages("the dataset is deposited in Zenodo. " * 40)
     assert out and all(p["section"] == "" for p in out), (
         "a parser with no structure must not invent one"
     )
 
 
-def test_locator_is_derived_from_where_the_quote_was_found():
+def test_locator_is_derived_from_where_the_quote_was_found() -> None:
     from dap.classify import locate_evidence
 
     passages = [
@@ -2233,7 +2403,7 @@ def test_locator_is_derived_from_where_the_quote_was_found():
     assert ev[1].locator == "section: METHODS"
 
 
-def test_locator_stays_empty_when_the_parser_had_no_structure():
+def test_locator_stays_empty_when_the_parser_had_no_structure() -> None:
     from dap.classify import locate_evidence
 
     ev = [sources_evidence(1, "deposited in Zenodo")]
@@ -2241,13 +2411,22 @@ def test_locator_stays_empty_when_the_parser_had_no_structure():
     assert ev[0].locator == "", "no structure means no locator, not a guessed one"
 
 
-def sources_evidence(i, quote):
+def sources_evidence(i: int, quote: str) -> Evidence:
+    """Build an evidence item.
+
+    Args:
+        i: The evidence id.
+        quote: The quoted text.
+
+    Returns:
+        The evidence item.
+    """
     from dap.schema import Evidence
 
     return Evidence(id=i, quote=quote)
 
 
-def test_the_model_cannot_fake_a_locator():
+def test_the_model_cannot_fake_a_locator() -> None:
     """A model-supplied locator is overwritten by the derived one."""
     from dap.classify import locate_evidence
     from dap.schema import Evidence
@@ -2265,13 +2444,18 @@ def test_the_model_cannot_fake_a_locator():
 # from full text (none of those papers had a Crossref DAS), yet all 6 were
 # recorded as crossref_assertion.
 # ---------------------------------------------------------------------------
-def _das_payload():
+def _das_payload() -> dict:
+    """Build a valid payload that reports a data-availability statement.
+
+    Returns:
+        The classification payload.
+    """
     p = copy.deepcopy(good_payload())
     p["das_present"] = True
     return p
 
 
-def test_das_read_from_full_text_is_labelled_full_text():
+def test_das_read_from_full_text_is_labelled_full_text() -> None:
     rec = C._assemble(
         _das_payload(),
         openalex_id="W1",
@@ -2290,7 +2474,7 @@ def test_das_read_from_full_text_is_labelled_full_text():
     assert rec.das_source == "full_text"
 
 
-def test_das_deposited_to_crossref_is_labelled_crossref_assertion():
+def test_das_deposited_to_crossref_is_labelled_crossref_assertion() -> None:
     rec = C._assemble(
         _das_payload(),
         openalex_id="W1",
@@ -2309,7 +2493,7 @@ def test_das_deposited_to_crossref_is_labelled_crossref_assertion():
     assert rec.das_source == "crossref_assertion"
 
 
-def test_no_das_is_labelled_none_regardless_of_crossref():
+def test_no_das_is_labelled_none_regardless_of_crossref() -> None:
     p = copy.deepcopy(good_payload())
     p["das_present"] = False
     rec = C._assemble(
@@ -2330,7 +2514,7 @@ def test_no_das_is_labelled_none_regardless_of_crossref():
     assert rec.das_source == "none"
 
 
-def test_api_path_passes_the_crossref_flag_through():
+def test_api_path_passes_the_crossref_flag_through() -> None:
     """The call site, not just _assemble. Asserting full_text here would prove
     nothing — that is also the default when a call site forgets the flag — so the
     input carries a Crossref statement and the record must say crossref_assertion.
@@ -2380,10 +2564,23 @@ CATALOGUE_HTML = (
 ).encode()
 
 
-def _cascade_over(locations, routes, *, doi="", title="Transmon readout fidelity"):
-    """Drive the cascade over `locations` only. best_oa_location is read for
-    pdf_url/url/oa_url and never for landing_page_url, so a catalogue page has
-    to arrive through the locations list.
+def _cascade_over(
+    locations: list[dict], routes: dict, *, doi: str = "", title: str = "Transmon readout fidelity"
+) -> FullText:
+    """Drive the cascade over `locations` only.
+
+    best_oa_location is read for pdf_url/url/oa_url and never for
+    landing_page_url, so a catalogue page has to arrive through the locations
+    list.
+
+    Args:
+        locations: The OpenAlex locations of the paper.
+        routes: The faked responses (see `fake_get_factory`).
+        doi: The paper's DOI.
+        title: The paper's title.
+
+    Returns:
+        What the cascade retrieved.
     """
     work = {"best_oa_location": {}, "locations": locations, "ids": {}}
     original = sources._get
@@ -2396,7 +2593,7 @@ def _cascade_over(locations, routes, *, doi="", title="Transmon readout fidelity
         sources._get = original
 
 
-def test_a_catalogue_page_is_followed_to_the_pdf_it_names():
+def test_a_catalogue_page_is_followed_to_the_pdf_it_names() -> None:
     ft = _cascade_over(
         [{"landing_page_url": "https://osti.example/biblio/1"}],
         {
@@ -2414,7 +2611,7 @@ def test_a_catalogue_page_is_followed_to_the_pdf_it_names():
     )
 
 
-def test_following_a_catalogue_page_is_not_recursive():
+def test_following_a_catalogue_page_is_not_recursive() -> None:
     """A catalogue page whose citation_pdf_url points at another catalogue page
     must stop, not walk a chain of them.
     """
@@ -2425,7 +2622,7 @@ def test_following_a_catalogue_page_is_not_recursive():
     ).encode()
     calls = []
 
-    def counting(cfg, url, **kw):
+    def counting(cfg: Config, url: str, **kw: object) -> FakeResponse:
         calls.append(url)
         return FakeResponse(headers={"Content-Type": "text/html"}, content=loop)
 
@@ -2434,7 +2631,7 @@ def test_following_a_catalogue_page_is_not_recursive():
     assert len(calls) == 2, f"expected exactly one follow, got {calls}"
 
 
-def test_a_page_without_the_meta_tag_is_still_not_an_article():
+def test_a_page_without_the_meta_tag_is_still_not_an_article() -> None:
     ft = _cascade_over(
         [{"landing_page_url": "https://doi.org/10.1/x"}],
         {"doi.org": FakeResponse(headers={"Content-Type": "text/html"}, content=STUB_HTML)},
@@ -2447,10 +2644,10 @@ def test_a_page_without_the_meta_tag_is_still_not_an_article():
 # Regression: DOAJ indexes open-access journals, it does not host them.
 # 58 attempts across the frame, none yielding text, many collecting a 403.
 # ---------------------------------------------------------------------------
-def test_an_index_only_host_is_skipped_without_a_request():
+def test_an_index_only_host_is_skipped_without_a_request() -> None:
     calls = []
 
-    def counting(cfg, url, **kw):
+    def counting(cfg: Config, url: str, **kw: object) -> FakeResponse:
         calls.append(url)
         return FakeResponse(headers={"Content-Type": "text/html"}, content=ARTICLE_HTML)
 
@@ -2468,7 +2665,7 @@ def test_an_index_only_host_is_skipped_without_a_request():
     )
 
 
-def test_a_pubmed_abstract_page_is_never_fetched_but_pmc_still_is():
+def test_a_pubmed_abstract_page_is_never_fetched_but_pmc_still_is() -> None:
     """`pubmed.ncbi.nlm.nih.gov/<pmid>/` is always an abstract page; the full
     text lives on `pmc.ncbi.nlm.nih.gov`, a different host. 95 rows had a PubMed
     abstract stored as their text, 21 of them recorded as `full_text`, and three
@@ -2476,7 +2673,7 @@ def test_a_pubmed_abstract_page_is_never_fetched_but_pmc_still_is():
     """
     calls = []
 
-    def counting(cfg, url, **kw):
+    def counting(cfg: Config, url: str, **kw: object) -> FakeResponse:
         calls.append(url)
         return FakeResponse(headers={"Content-Type": "text/html"}, content=ARTICLE_HTML)
 
@@ -2501,7 +2698,16 @@ def test_a_pubmed_abstract_page_is_never_fetched_but_pmc_still_is():
 # The search is allowed back only as a last resort and only with the checks v1
 # lacked. These tests exist to keep those checks in place.
 # ---------------------------------------------------------------------------
-def _arxiv_feed(*entries):
+def _arxiv_feed(*entries: tuple) -> bytes:
+    """Build an arXiv API response.
+
+    Args:
+        *entries: `(arxiv_id, title, year, author_names)` tuples, one per
+            entry of the feed.
+
+    Returns:
+        The Atom feed, encoded.
+    """
     body = "".join(
         f"<entry><id>http://arxiv.org/abs/{i}</id><title>{t}</title>"
         f"<published>{y}-01-01T00:00:00Z</published>"
@@ -2520,7 +2726,16 @@ REAL = (
 )
 
 
-def _search(routes, **kw):
+def _search(routes: dict, **kw: object) -> tuple[str | None, str]:
+    """Run `arxiv_search` with faked responses.
+
+    Args:
+        routes: The faked responses (see `fake_get_factory`).
+        **kw: The keyword arguments for `arxiv_search`.
+
+    Returns:
+        A tuple `(arxiv_id, why)`, as `arxiv_search` returns it.
+    """
     original = sources._get
     sources._get = fake_get_factory(routes)
     try:
@@ -2529,7 +2744,7 @@ def _search(routes, **kw):
         sources._get = original
 
 
-def test_arxiv_search_accepts_a_title_and_author_match():
+def test_arxiv_search_accepts_a_title_and_author_match() -> None:
     got, why = _search(
         {"arxiv.org": FakeResponse(content=_arxiv_feed(REAL))},
         title="Quantum advantage in learning from experiments",
@@ -2540,7 +2755,7 @@ def test_arxiv_search_accepts_a_title_and_author_match():
     assert "huang" in why or "broughton" in why, f"the reason must be auditable: {why}"
 
 
-def test_arxiv_search_refuses_a_near_title_by_different_authors():
+def test_arxiv_search_refuses_a_near_title_by_different_authors() -> None:
     """The v1 failure, exactly: a paper on the same topic with a similar title
     is not this paper. Without the author check this returns an id and the wrong
     text is classified as though it were the paper.
@@ -2561,7 +2776,7 @@ def test_arxiv_search_refuses_a_near_title_by_different_authors():
     assert "author" in why
 
 
-def test_arxiv_search_refuses_a_different_title_by_the_same_authors():
+def test_arxiv_search_refuses_a_different_title_by_the_same_authors() -> None:
     """Prolific groups publish repeatedly. Sharing an author is not sharing a
     paper.
     """
@@ -2581,7 +2796,7 @@ def test_arxiv_search_refuses_a_different_title_by_the_same_authors():
     assert "overlap" in why
 
 
-def test_arxiv_search_refuses_a_match_too_far_from_the_publication_year():
+def test_arxiv_search_refuses_a_match_too_far_from_the_publication_year() -> None:
     old = (
         "0901.00003",
         "Quantum advantage in learning from experiments",
@@ -2598,7 +2813,7 @@ def test_arxiv_search_refuses_a_match_too_far_from_the_publication_year():
     assert "year" in why
 
 
-def test_arxiv_search_refuses_when_we_have_no_authors_to_check():
+def test_arxiv_search_refuses_when_we_have_no_authors_to_check() -> None:
     """Unverifiable is not a pass. With no authors on record the only available
     check is the title, which is exactly what went wrong in v1.
     """
@@ -2611,7 +2826,7 @@ def test_arxiv_search_refuses_when_we_have_no_authors_to_check():
     assert got is None and "authors" in why
 
 
-def test_arxiv_search_picks_the_matching_entry_out_of_several():
+def test_arxiv_search_picks_the_matching_entry_out_of_several() -> None:
     decoy = ("2202.00009", "Quantum advantage in learning from noise", 2022, ["Someone Else"])
     got, _ = _search(
         {"arxiv.org": FakeResponse(content=_arxiv_feed(decoy, REAL))},
@@ -2622,13 +2837,13 @@ def test_arxiv_search_picks_the_matching_entry_out_of_several():
     assert got == "2101.11390"
 
 
-def test_the_cascade_only_searches_arxiv_after_everything_else_failed():
+def test_the_cascade_only_searches_arxiv_after_everything_else_failed() -> None:
     """A search is a guess with checks on it. It must never pre-empt a location
     that would have given the version of record.
     """
     calls = []
 
-    def counting(cfg, url, **kw):
+    def counting(cfg: Config, url: str, **kw: object) -> FakeResponse:
         calls.append(url)
         if "export.arxiv.org" in url:
             raise AssertionError("searched arXiv while a real location worked")
@@ -2638,13 +2853,13 @@ def test_the_cascade_only_searches_arxiv_after_everything_else_failed():
     assert ft.ok and ft.url == "https://repo.example/a.pdf"
 
 
-def test_the_cascade_falls_back_to_a_verified_arxiv_search():
+def test_the_cascade_falls_back_to_a_verified_arxiv_search() -> None:
     body = (
         "<html><body><article>" + "We show a quantum advantage in learning from experiments on the "
         "device, and deposit the dataset. " * 60 + "</article></body></html>"
     ).encode()
 
-    def routed(cfg, url, **kw):
+    def routed(cfg: Config, url: str, **kw: object) -> FakeResponse:
         if "export.arxiv.org" in url:
             return FakeResponse(content=_arxiv_feed(REAL))
         if "arxiv.org/pdf/2101.11390" in url:
@@ -2722,7 +2937,18 @@ REFUSED = {
 TIMES_OUT = sources.TransientError("exhausted 4 attempts: ConnectTimeout")
 
 
-def _mirror_cascade(routes, work=PUBLISHER_THEN_MIRROR):
+def _mirror_cascade(routes: dict, work: dict = PUBLISHER_THEN_MIRROR) -> FullText:
+    """Run the cascade for a paper with a publisher copy and a mirror.
+
+    Every location a test does not route is refused, as in `REFUSED`.
+
+    Args:
+        routes: The faked responses; they take precedence over the refusals.
+        work: The OpenAlex work object.
+
+    Returns:
+        What the cascade retrieved.
+    """
     # Routes match by substring, first key first: a test's own routes go ahead
     # of the refusals, so `doi.org/<doi>` is seen before the bare `doi.org`.
     routes = {**routes, **{k: v for k, v in REFUSED.items() if k not in routes}}
@@ -2741,7 +2967,7 @@ def _mirror_cascade(routes, work=PUBLISHER_THEN_MIRROR):
         sources._get = original
 
 
-def test_a_mirror_that_times_out_falls_back_to_arxiv():
+def test_a_mirror_that_times_out_falls_back_to_arxiv() -> None:
     ft = _mirror_cascade({"mirror.example": TIMES_OUT, "repo.example": TIMES_OUT, **ARXIV_FINDS_IT})
     assert ft.ok and ft.source is TextSource.ARXIV
     assert (
@@ -2752,7 +2978,7 @@ def test_a_mirror_that_times_out_falls_back_to_arxiv():
     )
 
 
-def test_a_later_repository_copy_is_taken_after_a_mirror_times_out():
+def test_a_later_repository_copy_is_taken_after_a_mirror_times_out() -> None:
     """W4386830972: the bitstream timed out and the same repository's handle
     page answered, and the paper was parked anyway.
     """
@@ -2760,7 +2986,7 @@ def test_a_later_repository_copy_is_taken_after_a_mirror_times_out():
     assert ft.ok and ft.url == "https://repo.example/handle/10993/59088"
 
 
-def test_a_repository_doi_is_a_mirror_not_the_publisher():
+def test_a_repository_doi_is_a_mirror_not_the_publisher() -> None:
     """ETH Zurich mints its own DOIs; only the paper's own DOI is the publisher's."""
     work = dict(
         PUBLISHER_THEN_MIRROR,
@@ -2770,21 +2996,21 @@ def test_a_repository_doi_is_a_mirror_not_the_publisher():
     assert ft.ok and ft.source is TextSource.ARXIV
 
 
-def test_the_papers_own_doi_timing_out_is_still_waited_for():
+def test_the_papers_own_doi_timing_out_is_still_waited_for() -> None:
     with pytest.raises(sources.TransientError, match=MIRROR_DOI):
         _mirror_cascade(
             {f"doi.org/{MIRROR_DOI}": TIMES_OUT, "mirror.example": LEARNING_PAGE, **ARXIV_FINDS_IT}
         )
 
 
-def test_the_publishers_host_timing_out_is_still_waited_for():
+def test_the_publishers_host_timing_out_is_still_waited_for() -> None:
     with pytest.raises(sources.TransientError, match="publisher.example"):
         _mirror_cascade(
             {"publisher.example": TIMES_OUT, "mirror.example": LEARNING_PAGE, **ARXIV_FINDS_IT}
         )
 
 
-def test_an_unpaywall_lookup_timing_out_is_still_waited_for():
+def test_an_unpaywall_lookup_timing_out_is_still_waited_for() -> None:
     """The lookup is not a copy: what it would have returned is unknown."""
     with pytest.raises(sources.TransientError, match="api.unpaywall.org"):
         _mirror_cascade(
@@ -2797,7 +3023,7 @@ def test_an_unpaywall_lookup_timing_out_is_still_waited_for():
         )
 
 
-def test_a_mirror_timeout_with_nothing_else_found_is_still_retried():
+def test_a_mirror_timeout_with_nothing_else_found_is_still_retried() -> None:
     """Releasing the fallback must not turn a retry into a text-less record:
     the mirror may hold the only readable copy.
     """
@@ -2811,7 +3037,7 @@ def test_a_mirror_timeout_with_nothing_else_found_is_still_retried():
         )
 
 
-def test_a_repository_typed_preferred_location_is_a_mirror():
+def test_a_repository_typed_preferred_location_is_a_mirror() -> None:
     work = {
         "best_oa_location": {
             "pdf_url": "https://mirror.example/bitstream/1.pdf",
@@ -2825,7 +3051,7 @@ def test_a_repository_typed_preferred_location_is_a_mirror():
     assert ft.ok and ft.source is TextSource.ARXIV
 
 
-def test_crossref_author_family_names_are_collected():
+def test_crossref_author_family_names_are_collected() -> None:
     payload = {
         "message": {
             "type": "journal-article",
@@ -2850,8 +3076,15 @@ def test_crossref_author_family_names_are_collected():
 # papers in this corpus — IOP and Springer above all — that is the only lawful
 # route to the version of record.
 # ---------------------------------------------------------------------------
-def _pdf_bytes(text):
-    """A one-page PDF carrying `text`, built with the parser we actually use."""
+def _pdf_bytes(text: str) -> bytes:
+    """Build a one-page PDF carrying a text, with the parser we actually use.
+
+    Args:
+        text: The text to put on the page.
+
+    Returns:
+        The bytes of the PDF.
+    """
     import pymupdf
 
     doc = pymupdf.open()
@@ -2868,11 +3101,11 @@ ARTICLE_WORDS = (
 )
 
 
-def test_a_hand_fetched_pdf_is_used_and_wins_over_the_network(tmp_path):
+def test_a_hand_fetched_pdf_is_used_and_wins_over_the_network(tmp_path: Path) -> None:
     (tmp_path / "10.1088_x.y.pdf").write_bytes(_pdf_bytes(ARTICLE_WORDS))
     cfg = Config(contact_email="researcher@institution.edu", pdf_dir=str(tmp_path))
 
-    def explode(c, url, **kw):
+    def explode(c: Config, url: str, **kw: object) -> NoReturn:
         raise AssertionError(f"went to the network with a local copy in hand: {url}")
 
     original = sources._get
@@ -2896,7 +3129,7 @@ def test_a_hand_fetched_pdf_is_used_and_wins_over_the_network(tmp_path):
     assert "transmon" in ft.text.lower()
 
 
-def test_a_local_pdf_can_be_named_by_openalex_id(tmp_path):
+def test_a_local_pdf_can_be_named_by_openalex_id(tmp_path: Path) -> None:
     (tmp_path / "W123.pdf").write_bytes(_pdf_bytes(ARTICLE_WORDS))
     cfg = Config(contact_email="researcher@institution.edu", pdf_dir=str(tmp_path))
     ft = sources.retrieve_full_text(
@@ -2913,7 +3146,7 @@ def test_a_local_pdf_can_be_named_by_openalex_id(tmp_path):
     assert ft.ok and ft.source is TextSource.LOCAL_PDF
 
 
-def test_a_local_pdf_that_is_not_the_article_is_refused(tmp_path):
+def test_a_local_pdf_that_is_not_the_article_is_refused(tmp_path: Path) -> None:
     """A scanned page with no text layer, or the wrong paper filed under this
     name, is not usable just because it is local.
     """
@@ -2931,7 +3164,7 @@ def test_a_local_pdf_that_is_not_the_article_is_refused(tmp_path):
     assert not ft.ok, "a local file still has to look like the article"
 
 
-def test_no_pdf_dir_configured_changes_nothing(tmp_path):
+def test_no_pdf_dir_configured_changes_nothing(tmp_path: Path) -> None:
     cfg = Config(contact_email="researcher@institution.edu")
     original = sources._get
     sources._get = fake_get_factory(
@@ -2971,7 +3204,7 @@ LONG_TITLE = (
 SHORT_TITLE = "Scaling silicon-based quantum computing using CMOS technology"
 
 
-def test_a_dropped_subtitle_is_still_the_same_paper():
+def test_a_dropped_subtitle_is_still_the_same_paper() -> None:
     from dap.sources import _title_overlap, titles_agree
 
     assert _title_overlap(SHORT_TITLE, LONG_TITLE) < 0.85, (
@@ -2982,7 +3215,7 @@ def test_a_dropped_subtitle_is_still_the_same_paper():
     assert "contained" in why, "the reason must say which rule admitted it"
 
 
-def test_a_generic_title_inside_a_longer_one_is_still_refused():
+def test_a_generic_title_inside_a_longer_one_is_still_refused() -> None:
     """'Quantum Computing' is contained in almost every arXiv quantum paper,
     and a paper with exactly that title is in this corpus.
     """
@@ -2995,7 +3228,7 @@ def test_a_generic_title_inside_a_longer_one_is_still_refused():
     assert "too generic" in why
 
 
-def test_containment_does_not_admit_a_merely_related_paper():
+def test_containment_does_not_admit_a_merely_related_paper() -> None:
     from dap.sources import titles_agree
 
     agreed, _ = titles_agree(
@@ -3005,7 +3238,7 @@ def test_containment_does_not_admit_a_merely_related_paper():
     assert agreed is False
 
 
-def test_the_author_check_still_decides_an_identically_titled_paper():
+def test_the_author_check_still_decides_an_identically_titled_paper() -> None:
     """Containment cannot weaken this: the title route only gets you as far as
     the author check, which is what caught Saffman's identically-titled paper
     by a different group.
@@ -3021,7 +3254,7 @@ def test_the_author_check_still_decides_an_identically_titled_paper():
 # ---------------------------------------------------------------------------
 # A host that serves both a catalogue record and the real article.
 # ---------------------------------------------------------------------------
-def test_the_osti_record_path_is_skipped_but_the_text_path_is_not():
+def test_the_osti_record_path_is_skipped_but_the_text_path_is_not() -> None:
     from dap.sources import _is_catalogue_url
 
     assert _is_catalogue_url("https://www.osti.gov/biblio/1777671") is True
@@ -3033,7 +3266,7 @@ def test_the_osti_record_path_is_skipped_but_the_text_path_is_not():
     )
 
 
-def test_a_denied_host_is_never_fetched():
+def test_a_denied_host_is_never_fetched() -> None:
     """DAP_DENY_HOSTS is the blunt instrument, for when a host must go entirely."""
     cfg = Config(contact_email="r@i.edu", deny_hosts=frozenset({"osti.gov"}))
     work = {
@@ -3068,7 +3301,7 @@ PURE_RECORD = (
 )
 
 
-def test_a_research_portal_record_is_not_article_text():
+def test_a_research_portal_record_is_not_article_text() -> None:
     """A Pure portal page prints the record in six citation styles and no body.
     It carries the title and an abstract, so nothing else catches it.
     """
@@ -3081,13 +3314,13 @@ def test_a_research_portal_record_is_not_article_text():
     )
 
 
-def test_a_paper_that_says_research_output_once_is_still_accepted():
+def test_a_paper_that_says_research_output_once_is_still_accepted() -> None:
     """The threshold protects a bibliometrics paper that uses the phrase."""
     text = ("We count the research output of each department by year. ") + PROSE
     assert looks_like_article(text, "") is True
 
 
-def test_a_paper_that_tells_you_how_to_cite_it_is_not_a_record_page():
+def test_a_paper_that_tells_you_how_to_cite_it_is_not_a_record_page() -> None:
     """Found as a false positive: a Zenodo-deposited framework paper carrying a
     'How to Cite this Work' section and a BibTeX block for self-citation. That
     is article content, and the kind of article this study most wants to see.
@@ -3101,7 +3334,7 @@ def test_a_paper_that_tells_you_how_to_cite_it_is_not_a_record_page():
     assert looks_like_article(text, "") is True
 
 
-def test_a_paper_whose_only_passage_is_its_reference_list():
+def test_a_paper_whose_only_passage_is_its_reference_list() -> None:
     """Found in a live batch: a two-column PDF interleaves the bibliography with
     the neighbouring column, which pads the word count with body text and pulls
     the density below the per-passage bar. The one surviving passage was a
@@ -3116,7 +3349,7 @@ def test_a_paper_whose_only_passage_is_its_reference_list():
     assert only_bibliography([]) is False, "no passages is a different condition"
 
 
-def test_an_availability_heading_is_never_treated_as_bibliography():
+def test_an_availability_heading_is_never_treated_as_bibliography() -> None:
     """The back matter of a two-column paper renders beside the reference column,
     so the one passage that answers the study's question looks like references.
     """
@@ -3126,7 +3359,7 @@ def test_an_availability_heading_is_never_treated_as_bibliography():
     assert only_bibliography(das) is False
 
 
-def test_a_pure_portal_in_danish_is_caught_too():
+def test_a_pure_portal_in_danish_is_caught_too() -> None:
     """Pure is deployed in the local language; the English markers miss it."""
     text = (
         "Protected Hybrid Superconducting Qubit in an Array of Gate-Tunable "
@@ -3146,7 +3379,7 @@ def test_a_pure_portal_in_danish_is_caught_too():
     )
 
 
-def test_a_hal_record_page_is_caught_too():
+def test_a_hal_record_page_is_caught_too() -> None:
     """HAL serves the record in French; two of these reached the classifier."""
     text = (
         "Article Dans Une Revue  PRX Quantum  Annee : 2022\n"
@@ -3164,7 +3397,7 @@ def test_a_hal_record_page_is_caught_too():
     )
 
 
-def test_a_transport_error_does_not_make_a_path_broken():
+def test_a_transport_error_does_not_make_a_path_broken() -> None:
     """`access_unresolvable` means promised and broken. A connect timeout, a DNS
     failure or a 503 says the check did not complete -- an institutional GitLab
     behind a firewall and a decommissioned one produce the same error. 19

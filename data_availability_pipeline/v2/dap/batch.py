@@ -30,11 +30,18 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .classify import _PRICES, BATCH_DISCOUNT, TIER_FAST, Usage, _assemble, grounding_text
 from .schema import Arm, Retrieval, SchemaError, TextSource
+
+if TYPE_CHECKING:
+    import anthropic
+
+    from .store import Store
 
 #: Well under the 100,000-request / 256 MB ceiling. Smaller batches surface
 #: failures sooner and keep any single loss small; there is no throughput
@@ -48,26 +55,62 @@ MAX_REQUEST_BYTES = 400_000
 
 @dataclass
 class SpoolEntry:
+    """One classification request waiting to be submitted in a batch.
+
+    Attributes:
+        custom_id: The batch `custom_id`: the paper's OpenAlex id, sanitised
+            with `safe_custom_id`.
+        params: The Messages API parameters of the request.
+        meta: The paper's metadata, carried through so `collect` can rebuild
+            the record.
+    """
+
     custom_id: str  # == openalex_id, sanitised
     params: dict
     meta: dict  # carried through so `collect` can rebuild the record
 
 
 def safe_custom_id(openalex_id: str) -> str:
-    """custom_id must match ^[a-zA-Z0-9_-]{1,64}$ — OpenAlex ids are URLs."""
+    """Make an OpenAlex id usable as a batch `custom_id`.
+
+    A `custom_id` must match `^[a-zA-Z0-9_-]{1,64}$`, and OpenAlex ids are
+    URLs.
+
+    Args:
+        openalex_id: The paper's OpenAlex id, bare or as a URL.
+
+    Returns:
+        The last path segment of the id with every other character replaced
+        by `_`, cut to 64 characters; `"unknown"` if nothing is left.
+    """
     tail = openalex_id.rsplit("/", 1)[-1]
     cleaned = "".join(c if (c.isalnum() or c in "_-") else "_" for c in tail)
     return cleaned[:64] or "unknown"
 
 
 class Spool:
-    """Append-only JSONL staging area for requests awaiting submission."""
+    """Append-only JSONL staging area for requests awaiting submission.
 
-    def __init__(self, root: str | Path):
+    Attributes:
+        root: The directory that holds the `spool_*.jsonl` files.
+    """
+
+    def __init__(self, root: str | Path) -> None:
+        """Open a spool directory, creating it if needed.
+
+        Args:
+            root: The directory to keep the spool files in.
+        """
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
 
     def _open_file(self) -> Path:
+        """Pick the spool file the next request is appended to.
+
+        Returns:
+            The last spool file if it holds fewer than `BATCH_SIZE` requests,
+            otherwise the path of a new one.
+        """
         existing = sorted(self.root.glob("spool_*.jsonl"))
         if existing:
             last = existing[-1]
@@ -76,6 +119,16 @@ class Spool:
         return self.root / f"spool_{len(existing):05d}.jsonl"
 
     def add(self, entry: SpoolEntry) -> None:
+        """Append one request to the spool.
+
+        A request larger than `MAX_REQUEST_BYTES` has its passages cut rather
+        than being dropped, and `entry.meta["truncated_input"]` is set so the
+        record carries the fact that it was classified on less evidence.
+
+        Args:
+            entry: The request to spool. It is modified in place when it has to
+                be truncated.
+        """
         line = json.dumps(
             {"custom_id": entry.custom_id, "params": entry.params, "meta": entry.meta}
         )
@@ -95,6 +148,15 @@ class Spool:
             f.write(line + "\n")
 
     def ready_files(self, *, include_partial: bool = False) -> list[Path]:
+        """List the spool files that can be submitted.
+
+        Args:
+            include_partial: Whether to include a file that holds fewer than
+                `BATCH_SIZE` requests.
+
+        Returns:
+            The spool files, oldest first.
+        """
         files = sorted(self.root.glob("spool_*.jsonl"))
         if include_partial:
             return files
@@ -102,14 +164,43 @@ class Spool:
 
     @staticmethod
     def read(path: Path) -> list[dict]:
+        """Read every request of a spool file.
+
+        Args:
+            path: The spool file.
+
+        Returns:
+            One dict per request, with `custom_id`, `params` and `meta`.
+        """
         return [json.loads(l) for l in path.open(encoding="utf-8") if l.strip()]
 
 
 # ---------------------------------------------------------------------------
 def submit(
-    client, store, spool: Spool, *, flush: bool = False, dry_run: bool = False, log=print
+    client: anthropic.Anthropic,
+    store: Store,
+    spool: Spool,
+    *,
+    flush: bool = False,
+    dry_run: bool = False,
+    log: Callable[[str], None] = print,
 ) -> int:
-    """Create batches from spooled requests. Returns the number submitted."""
+    """Create batches from the spooled requests.
+
+    Each batch is recorded in the store before its spool file is deleted, so
+    a crash costs a duplicate submission at worst, never a lost set of papers.
+
+    Args:
+        client: The Anthropic client to submit with.
+        store: The pipeline state; each batch and its members are recorded.
+        spool: The spool to drain.
+        flush: Whether to submit a partial spool file as well.
+        dry_run: Whether to only report what would be submitted.
+        log: Called with each progress message.
+
+    Returns:
+        The number of batches submitted (or, on a dry run, that would be).
+    """
     files = spool.ready_files(include_partial=flush)
     if not files:
         log(
@@ -146,8 +237,20 @@ def submit(
     return submitted
 
 
-def poll(client, store, *, log=print) -> dict[str, str]:
-    """Refresh the processing status of every open batch."""
+def poll(
+    client: anthropic.Anthropic, store: Store, *, log: Callable[[str], None] = print
+) -> dict[str, str]:
+    """Refresh the processing status of every open batch.
+
+    Args:
+        client: The Anthropic client to query with.
+        store: The pipeline state, which lists the open batches.
+        log: Called with one status line per batch.
+
+    Returns:
+        The processing status of each batch that could be retrieved, by
+        batch id.
+    """
     out = {}
     for bid in store.open_batches():
         try:
@@ -168,11 +271,23 @@ def poll(client, store, *, log=print) -> dict[str, str]:
     return out
 
 
-def collect(client, store, *, log=print) -> dict[str, int]:
+def collect(
+    client: anthropic.Anthropic, store: Store, *, log: Callable[[str], None] = print
+) -> dict[str, int]:
     """Pull results from ended batches, validate, and advance the papers.
 
     Idempotent: a paper already advanced is skipped, so this can be re-run as
     often as you like while other batches are still processing.
+
+    Args:
+        client: The Anthropic client to pull results with.
+        store: The pipeline state. Valid records are saved; failed and
+            invalid ones are recorded or sent back for a synchronous retry.
+        log: Called with each progress message.
+
+    Returns:
+        A tally with the keys `succeeded`, `errored`, `expired`, `invalid`
+        and `skipped`.
     """
     tally = {"succeeded": 0, "errored": 0, "expired": 0, "invalid": 0, "skipped": 0}
 
@@ -285,7 +400,17 @@ def collect(client, store, *, log=print) -> dict[str, int]:
 def estimate_cost(
     n_papers: int, *, model: str = TIER_FAST, in_tokens: int = 6000, out_tokens: int = 1200
 ) -> tuple[float, float]:
-    """(synchronous, batched) USD for n papers at the given per-paper token use."""
+    """Estimate what classifying a number of papers costs.
+
+    Args:
+        n_papers: The number of papers.
+        model: The model id; a model with no known price costs 0.
+        in_tokens: The input tokens used per paper.
+        out_tokens: The output tokens used per paper.
+
+    Returns:
+        A tuple `(synchronous, batched)` in USD.
+    """
     pin, pout = _PRICES.get(model, (0.0, 0.0))
     sync = n_papers * (in_tokens * pin + out_tokens * pout) / 1_000_000
     return sync, sync * BATCH_DISCOUNT

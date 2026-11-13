@@ -93,7 +93,18 @@ EXPORT_COLS = [
 ]
 
 
-def wilson(k, n, z=1.96):
+def wilson(k: float, n: float, z: float = 1.96) -> tuple[float, float]:
+    """Compute the Wilson score interval for a binomial proportion.
+
+    Args:
+        k: The number of successes.
+        n: The number of trials.
+        z: The normal quantile of the interval; 1.96 gives a 95% interval.
+
+    Returns:
+        The `(lower, upper)` bounds, clipped to [0, 1]. Both are NaN when `n`
+        is 0.
+    """
     if n == 0:
         return (np.nan, np.nan)
     p = k / n
@@ -103,7 +114,30 @@ def wilson(k, n, z=1.96):
     return (max(0.0, c - h), min(1.0, c + h))
 
 
-def score(y_true, y_pred, labels):
+def score(
+    y_true: list[str], y_pred: list[str], labels: list[str]
+) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+    """Score the classifier against the human codes on one axis.
+
+    Undefined values are NaN, never 0: precision for a case the classifier
+    never predicted, recall for a case the human never assigned.
+
+    Args:
+        y_true: The human's case token for each paper.
+        y_pred: The classifier's case token for each paper, in the same order.
+        labels: The case tokens of the scheme, in publication order.
+
+    Returns:
+        A tuple `(confusion, per_class, summary)`. `confusion` is the matrix
+        with rows = human and columns = classifier. `per_class` has one row
+        per case: support, predicted, precision, recall and F1. `summary`
+        holds `n`, accuracy with its Wilson interval, macro and weighted
+        precision, recall and F1, `kappa`, `pabak`, and the number of classes
+        each macro average is taken over.
+
+    Raises:
+        ValueError: If either side holds a value that is not in `labels`.
+    """
     unknown = (set(y_true) | set(y_pred)) - set(labels)
     if unknown:
         raise ValueError(f"values not in the scheme: {unknown}")
@@ -130,7 +164,7 @@ def score(y_true, y_pred, labels):
         }
     )
 
-    def weighted(v):
+    def weighted(v: np.ndarray) -> float:
         m = ~np.isnan(v) & (support > 0)
         return float(np.average(v[m], weights=support[m])) if m.any() else np.nan
 
@@ -158,8 +192,21 @@ def score(y_true, y_pred, labels):
     return cm, per_class, summary
 
 
-def per_stratum(scored, labels):
-    """Accuracy of each axis inside each sampling stratum, scored separately."""
+def per_stratum(scored: list[dict], labels: list[str]) -> pd.DataFrame:
+    """Compute the accuracy of each axis inside each sampling stratum.
+
+    The axes are scored separately.
+
+    Args:
+        scored: The scored review rows; each has `stratum`, `a_agree`,
+            `b_agree` and `human_review_confidence`.
+        labels: The case tokens that can name a stratum, in publication order.
+
+    Returns:
+        One row per stratum that occurs and axis: `n`, `correct`, `accuracy`
+        with its Wilson interval, and how many of the stratum's papers the
+        human coded with low confidence.
+    """
     out = []
     for h in labels:
         grp = [r for r in scored if r["stratum"] == h]
@@ -184,7 +231,15 @@ def per_stratum(scored, labels):
     return pd.DataFrame(out)
 
 
-def main():
+def main() -> None:
+    """Export the human review and score the classifier against it.
+
+    Reads the command line (see the module docstring), writes the files it
+    lists to `--out` and prints the summary tables.
+
+    Raises:
+        SystemExit: If a `--merge` value is not a case token of the scheme.
+    """
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("csv", nargs="?", default=str(HERE / "human_review.csv"))
     ap.add_argument("--out", default=str(HERE / "review_results"))

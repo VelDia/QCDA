@@ -41,6 +41,14 @@ sys.path.insert(0, str(ROOT / "post-analysis"))
 
 
 def main() -> None:
+    """Build the gold set, its `enrol` input and the as-built predictions.
+
+    Reads the command line (`--review`, `--db`, `--out`, `--pred-out`), writes
+    the files listed in the module docstring and reports counts on stderr.
+    Exits with a message if a human code in the review is not a case token.
+    If the database is missing, the as-built predictions and the stratum
+    population are skipped.
+    """
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--review", default=str(ROOT / "post-analysis" / "human_review.csv"))
     ap.add_argument("--db", default=str(ROOT / "dap_final.sqlite"))

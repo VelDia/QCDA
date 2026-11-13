@@ -29,34 +29,76 @@ command run from v2/.
 import json
 
 
-def J(v, c, r, ev=None):
+def J(v: str, c: str, r: str, ev: list[int] | None = None) -> dict:
+    """Build one judgement object.
+
+    Args:
+        v: The value: a token of the field's vocabulary.
+        c: The confidence token.
+        r: The rationale, one sentence.
+        ev: The ids of the evidence items that support the value.
+
+    Returns:
+        The judgement, in the shape the classification schema expects.
+    """
     return {"value": v, "confidence": c, "rationale": r, "evidence_ids": ev or []}
 
 
 def mkaxis(
-    case,
-    case_c,
-    case_r,
+    case: str,
+    case_c: str,
+    case_r: str,
     *,
-    case_ev=None,
-    dt_ev=None,
-    gran_ev=None,
-    dt="unclear",
-    dt_c="medium",
-    dt_r="data type not established from the retrieved passages",
-    decl="none_stated",
-    decl_c="medium",
-    decl_r="no availability statement located",
-    decl_ev=None,
-    gran=None,
-    gran_c="low",
-    gran_r="not established from the retrieved passages",
-    identifiers=None,
-    names=None,
-    repo_types=None,
-    restriction="none_given",
-    pinned="none",
-):
+    case_ev: list[int] | None = None,
+    dt_ev: list[int] | None = None,
+    gran_ev: list[int] | None = None,
+    dt: str = "unclear",
+    dt_c: str = "medium",
+    dt_r: str = "data type not established from the retrieved passages",
+    decl: str = "none_stated",
+    decl_c: str = "medium",
+    decl_r: str = "no availability statement located",
+    decl_ev: list[int] | None = None,
+    gran: str | None = None,
+    gran_c: str = "low",
+    gran_r: str = "not established from the retrieved passages",
+    identifiers: list[str] | None = None,
+    names: list[str] | None = None,
+    repo_types: list[str] | None = None,
+    restriction: str = "none_given",
+    pinned: str = "none",
+) -> dict:
+    """Build one axis of a classification.
+
+    Every other builder in this file ends in a call to this one.
+
+    Args:
+        case: The case token.
+        case_c: The confidence of the case.
+        case_r: The rationale of the case.
+        case_ev: The evidence ids that support the case.
+        dt_ev: The evidence ids that support the data type.
+        gran_ev: The evidence ids that support the granularity.
+        dt: The data type token.
+        dt_c: The confidence of the data type.
+        dt_r: The rationale of the data type.
+        decl: The `declared` token: what the paper says about access.
+        decl_c: The confidence of `declared`.
+        decl_r: The rationale of `declared`.
+        decl_ev: The evidence ids that support `declared`.
+        gran: The granularity token. None chooses `not_applicable` for a
+            `not_applicable` case and `unclear` otherwise.
+        gran_c: The confidence of the granularity.
+        gran_r: The rationale of the granularity.
+        identifiers: The DOIs and URLs given, verbatim.
+        names: The dataset or source names given.
+        repo_types: The repository type tokens.
+        restriction: The restriction token.
+        pinned: The pinning token.
+
+    Returns:
+        The axis object, in the shape the classification schema expects.
+    """
     if gran is None:
         gran = "not_applicable" if case == "not_applicable" else "unclear"
     return {
@@ -72,11 +114,29 @@ def mkaxis(
     }
 
 
-def NA(reason, conf="medium"):
+def NA(reason: str, conf: str = "medium") -> dict:
+    """Build an axis that does not apply.
+
+    Args:
+        reason: The rationale: why the axis does not apply.
+        conf: The confidence of the case.
+
+    Returns:
+        A `not_applicable` axis.
+    """
     return mkaxis("not_applicable", conf, reason)
 
 
-def ev(*items):
+def ev(*items: tuple[str, str]) -> list[dict]:
+    """Build a record's evidence list.
+
+    Args:
+        *items: `(quote, section)` pairs, in the order their ids are to be
+            assigned.
+
+    Returns:
+        The evidence items, numbered from 1, with `full_text` as source.
+    """
     return [
         {"id": i + 1, "section": s, "locator": "", "source": "full_text", "quote": q}
         for i, (q, s) in enumerate(items)
@@ -121,7 +181,17 @@ NOSTAT_OUT = (
 # Axis-B builders only. A "no data" statement does not settle Axis A: code A
 # from the body with `NA`, `needs_data`, `noaxa` or `named_no_route`, whatever
 # the statement says. b76 once put `denied_anyway()` on axis A (W4406041920).
-def deny(extra=""):
+def deny(extra: str = "") -> dict:
+    """Build Axis B for a "no data" statement on an analytical paper.
+
+    Axis B only (S220): a "no data" statement does not settle Axis A.
+
+    Args:
+        extra: Text appended to the case rationale.
+
+    Returns:
+        A `not_applicable` axis that cites evidence 1, the statement.
+    """
     return mkaxis(
         "not_applicable",
         "medium",
@@ -141,7 +211,15 @@ def deny(extra=""):
     )
 
 
-def onreq(what="the data"):
+def onreq(what: str = "the data") -> dict:
+    """Build an axis for a formal statement that offers the data on request.
+
+    Args:
+        what: What the statement offers, as it reads in the rationale.
+
+    Returns:
+        An `on_request` axis that cites evidence 1, the statement.
+    """
     return mkaxis(
         "on_request",
         "medium",
@@ -162,11 +240,23 @@ def onreq(what="the data"):
 
 
 def inarticle(
-    dt="unclear",
-    dt_c="low",
-    dt_r="what the declared data consists of is not established",
-    dt_ev=None,
-):
+    dt: str = "unclear",
+    dt_c: str = "low",
+    dt_r: str = "what the declared data consists of is not established",
+    dt_ev: list[int] | None = None,
+) -> dict:
+    """Build an axis for data declared to be included within the article (P1).
+
+    Args:
+        dt: The data type token.
+        dt_c: The confidence of the data type.
+        dt_r: The rationale of the data type.
+        dt_ev: The evidence ids that support the data type.
+
+    Returns:
+        An `insufficiently_specified` axis, declared `public`, that cites
+        evidence 1, the statement.
+    """
     return mkaxis(
         "insufficiently_specified",
         "medium",
@@ -195,7 +285,15 @@ def inarticle(
 # `access_not_provided` -- needs_data here, and a copy named noaxa defined
 # locally in b73-b94 -- with no decision behind it. Import these; do not
 # redefine them in a batch builder, or the local copy shadows the rule.
-def needs_data(what):
+def needs_data(what: str) -> dict:
+    """Build Axis A for a task that needs external input the paper never names.
+
+    Args:
+        what: The task that requires the input.
+
+    Returns:
+        An `insufficiently_specified` axis at medium confidence (S83).
+    """
     return mkaxis(
         "insufficiently_specified",
         "medium",
@@ -211,7 +309,16 @@ def needs_data(what):
     )
 
 
-def noaxa(what, conf="low"):
+def noaxa(what: str, conf: str = "low") -> dict:
+    """Build Axis A for external input that the retrieved passages do not name.
+
+    Args:
+        what: The task that requires the input.
+        conf: The confidence of the case and of the data type.
+
+    Returns:
+        An `insufficiently_specified` axis (S83).
+    """
     return mkaxis(
         "insufficiently_specified",
         conf,
@@ -227,7 +334,14 @@ def noaxa(what, conf="low"):
     )
 
 
-def denied_anyway():
+def denied_anyway() -> dict:
+    """Build Axis B for a "no data" statement the paper's own task contradicts.
+
+    Axis B only (S220).
+
+    Returns:
+        A `not_applicable` axis at low confidence that cites evidence 1.
+    """
     return mkaxis(
         "not_applicable",
         "low",
@@ -247,11 +361,20 @@ def denied_anyway():
     )
 
 
-def no_data_statement(ev_ids, what="results"):
-    """Axis B under the no-data ruling: the statement governs B even when the
-    paper reports `what`. Pass the evidence id of the statement itself. Only
-    for Axis B; if the paper also gives an address for its code or data, do
-    not use this -- code the route and flag it (the ruling leaves that open).
+def no_data_statement(ev_ids: list[int], what: str = "results") -> dict:
+    """Build Axis B under the no-data ruling.
+
+    The statement governs B even when the paper reports `what`. Pass the
+    evidence id of the statement itself. Only for Axis B; if the paper also
+    gives an address for its code or data, do not use this -- code the route
+    and flag it (the ruling leaves that open).
+
+    Args:
+        ev_ids: The evidence id of the statement itself.
+        what: What the paper reports nonetheless.
+
+    Returns:
+        A `not_applicable` axis.
     """
     return mkaxis(
         "not_applicable",
@@ -273,7 +396,15 @@ def no_data_statement(ev_ids, what="results"):
     )
 
 
-def nodata(kind="analytical"):
+def nodata(kind: str = "analytical") -> dict:
+    """Build an axis for a paper that reports no dataset and has no statement.
+
+    Args:
+        kind: What the paper's content is throughout, e.g. `"analytical"`.
+
+    Returns:
+        A `not_applicable` axis.
+    """
     return mkaxis(
         "not_applicable",
         "medium",
@@ -291,7 +422,15 @@ def nodata(kind="analytical"):
     )
 
 
-def output_no_route(what):
+def output_no_route(what: str) -> dict:
+    """Build Axis B for computational output with no route to it.
+
+    Args:
+        what: The output the paper reports.
+
+    Returns:
+        An `access_not_provided` axis with data type `synthetic`.
+    """
     return mkaxis(
         "access_not_provided",
         "medium",
@@ -311,11 +450,20 @@ def output_no_route(what):
     )
 
 
-def hw_no_route(ev_ids, what):
-    """`output_no_route`'s hardware variant: the output is measured on a real
+def hw_no_route(ev_ids: list[int], what: str) -> dict:
+    """Build Axis B for output measured on quantum hardware, with no route.
+
+    `output_no_route`'s hardware variant: the output is measured on a real
     device, so the data type is `real`, not `synthetic`. Defined here from
     3 Oct; b99.py had it locally and b100.py needed it too, which is how the
     drift S83 and S90 found begins.
+
+    Args:
+        ev_ids: The evidence ids that support the case.
+        what: The output the paper reports.
+
+    Returns:
+        An `access_not_provided` axis with data type `real`.
     """
     return mkaxis(
         "access_not_provided",
@@ -337,8 +485,10 @@ def hw_no_route(ev_ids, what):
     )
 
 
-def lab_no_route(ev_ids, what, gran="processed"):
-    """`output_no_route`'s laboratory variant: the measurement was taken on
+def lab_no_route(ev_ids: list[int], what: str, gran: str = "processed") -> dict:
+    """Build Axis B for output measured on laboratory apparatus, with no route.
+
+    `output_no_route`'s laboratory variant: the measurement was taken on
     physical apparatus that is not a quantum processor, so the data type is
     `real` and the data is not "computational output".
 
@@ -369,6 +519,14 @@ def lab_no_route(ev_ids, what, gran="processed"):
     `hw_no_route` stays the right builder when the apparatus IS the quantum
     processor; this one is for everything else on the bench. Those 77 rows are
     stored, so correcting them is Diana's call, not an append.
+
+    Args:
+        ev_ids: The evidence ids that support the case.
+        what: The measurement the paper reports.
+        gran: The granularity token.
+
+    Returns:
+        An `access_not_provided` axis with data type `real`.
     """
     return mkaxis(
         "access_not_provided",
@@ -390,11 +548,13 @@ def lab_no_route(ev_ids, what, gran="processed"):
     )
 
 
-def severed_statement(ev_ids, what="the data"):
-    """A canonical availability statement whose ROUTE clause is not in the
-    retrieved text: the PDF's two-column layout interleaves the statement with
-    its neighbour and the claim survives while "...from the corresponding
-    author upon reasonable request" / "...at <doi>" does not.
+def severed_statement(ev_ids: list[int], what: str = "the data") -> dict:
+    """Build an axis for a canonical statement whose route clause is missing.
+
+    The ROUTE clause is not in the retrieved text: the PDF's two-column layout
+    interleaves the statement with its neighbour and the claim survives while
+    "...from the corresponding author upon reasonable request" / "...at
+    <doi>" does not.
 
     Added 4 Oct (S186) because the alternative is to infer the route from the
     publisher's usual template, and that inference is already in the store.
@@ -417,6 +577,14 @@ def severed_statement(ev_ids, what="the data"):
     So this builder records what the retrieved text establishes and nothing
     more: a claim is present, and no path a third party could follow is. It
     always flags, because the route is recoverable by a human with the PDF.
+
+    Args:
+        ev_ids: The evidence ids of the severed statement.
+        what: What the statement says is available.
+
+    Returns:
+        An `insufficiently_specified` axis at low confidence. The record
+        must be flagged for review.
     """
     return mkaxis(
         "insufficiently_specified",
@@ -440,8 +608,10 @@ def severed_statement(ev_ids, what="the data"):
     )
 
 
-def human_no_route(ev_ids, what):
-    """`output_no_route`'s human-subject variant: the data is what people said,
+def human_no_route(ev_ids: list[int], what: str) -> dict:
+    """Build Axis B for human-subject material with no route to it.
+
+    `output_no_route`'s human-subject variant: the data is what people said,
     so the data type is `real`, not `synthetic`, and it is not "computational
     output".
 
@@ -463,6 +633,13 @@ def human_no_route(ev_ids, what):
     `restriction` stays `none_given` on purpose: whether human-subject material
     without a stated restriction should carry `privacy` by default is open, and
     S143 measured 8 rows where the authors said so themselves.
+
+    Args:
+        ev_ids: The evidence ids that support the case.
+        what: The human-subject material the paper reports.
+
+    Returns:
+        An `access_not_provided` axis with data type `real`.
     """
     return mkaxis(
         "access_not_provided",
@@ -485,19 +662,35 @@ def human_no_route(ev_ids, what):
 
 
 def openrepo(
-    ids,
-    repos,
-    ev_ids,
-    what,
-    dt="synthetic",
-    gran="both",
-    gran_r="data together with the code that produced it",
-    pinned="unpinned_url",
-    names=None,
-    decl_c="high",
-):
-    """A statement that names the material AND gives its identifier. Defined
-    here from 3 Oct; b98.py and b99.py each had a copy.
+    ids: list[str],
+    repos: list[str],
+    ev_ids: list[int],
+    what: str,
+    dt: str = "synthetic",
+    gran: str = "both",
+    gran_r: str = "data together with the code that produced it",
+    pinned: str = "unpinned_url",
+    names: list[str] | None = None,
+    decl_c: str = "high",
+) -> dict:
+    """Build an axis for a statement that names the material AND its identifier.
+
+    Defined here from 3 Oct; b98.py and b99.py each had a copy.
+
+    Args:
+        ids: The identifiers given, verbatim.
+        repos: The repository type tokens.
+        ev_ids: The evidence ids of the statement.
+        what: The material the statement names.
+        dt: The data type token.
+        gran: The granularity token.
+        gran_r: The rationale of the granularity.
+        pinned: The pinning token.
+        names: The dataset or source names given.
+        decl_c: The confidence of `declared`.
+
+    Returns:
+        An `openly_accessible` axis, declared `public`.
     """
     return mkaxis(
         "openly_accessible",
@@ -523,9 +716,20 @@ def openrepo(
     )
 
 
-def supp(ev_ids, what, gran="processed", extra=""):
-    """S76's shape, still open: the only route is the publisher's supplement,
+def supp(ev_ids: list[int], what: str, gran: str = "processed", extra: str = "") -> dict:
+    """Build an axis for data located only in the publisher's supplement.
+
+    S76's shape, still open: the only route is the publisher's supplement,
     which is a real artefact with no identifier of its own.
+
+    Args:
+        ev_ids: The evidence ids of the statement.
+        what: The material the statement locates in the supplement.
+        gran: The granularity token.
+        extra: Text appended to the case rationale.
+
+    Returns:
+        An `insufficiently_specified` axis.
     """
     return mkaxis(
         "insufficiently_specified",
@@ -570,11 +774,31 @@ PT_WHY = {
 }
 
 
-def PT(v, conf="medium", why=None, ev=None):
+def PT(v: str, conf: str = "medium", why: str | None = None, ev: list[int] | None = None) -> dict:
+    """Build the paper-type judgement.
+
+    Args:
+        v: The paper type token.
+        conf: The confidence.
+        why: The rationale. None uses the stock rationale in `PT_WHY`.
+        ev: The evidence ids that support the type.
+
+    Returns:
+        The judgement object.
+    """
     return J(v, conf, why or PT_WHY[v], ev)
 
 
-def write(R, out):
+def write(R: list[tuple], out: str) -> None:
+    """Write a batch of records as a results file for `--import`.
+
+    Args:
+        R: The records, each a tuple `(custom_id, paper_type, axis_a,
+            axis_b, das_present, needs_human_review, review_reason,
+            evidence)`. `paper_type` may be a token, which is expanded with
+            `PT`.
+        out: The JSONL file to write.
+    """
     with open(out, "w") as f:
         for cid, pt, a, b, das, rev, why, evs in R:
             if isinstance(pt, str):
@@ -661,14 +885,35 @@ P9_RULE = (
 )
 
 
-def named_no_route(ev_ids, names, what, gran="raw", dt="real", decl=None):
-    """The written rule's other side from `noaxa`: the dataset IS identified and
+def named_no_route(
+    ev_ids: list[int],
+    names: list[str],
+    what: str,
+    gran: str = "raw",
+    dt: str = "real",
+    decl: str | None = None,
+) -> dict:
+    """Build Axis A for a named dataset with no route to it.
+
+    The written rule's other side from `noaxa`: the dataset IS identified and
     no route is given.
 
     Defined here from 3 Oct. Batches 93-99 each defined it locally, which is the
     same drift shape as the `noaxa` copies S83 found and the P3 wording S90
     found. The target case is the written one (`access_not_provided`); if Diana
     rules for `openly_accessible` this builder changes once, here.
+
+    Args:
+        ev_ids: The evidence ids that support the case.
+        names: The dataset names the paper gives.
+        what: The dataset, as it reads in the rationale.
+        gran: The granularity token.
+        dt: The data type token.
+        decl: The `declared` token. None records that no availability
+            statement was made.
+
+    Returns:
+        An `access_not_provided` axis.
     """
     return mkaxis(
         "access_not_provided",
@@ -697,14 +942,16 @@ def named_no_route(ev_ids, names, what, gran="raw", dt="real", decl=None):
 
 
 def ref_pointer(
-    ev_ids,
-    what="the data",
-    dt="synthetic",
-    dt_r="computational output the paper reports",
-    decl="public",
-    decl_r="declared deposited, via a reference that does not resolve here",
-):
-    """P4: the only route is a numbered reference or footnote that the retrieved
+    ev_ids: list[int],
+    what: str = "the data",
+    dt: str = "synthetic",
+    dt_r: str = "computational output the paper reports",
+    decl: str = "public",
+    decl_r: str = "declared deposited, via a reference that does not resolve here",
+) -> dict:
+    """Build an axis whose only route is an unresolved numbered reference (P4).
+
+    The only route is a numbered reference or footnote that the retrieved
     text does not resolve.
 
     P4 has been decided since 25 Sep and had a rule string here but no builder,
@@ -720,6 +967,18 @@ def ref_pointer(
     availability statement anywhere ("a dataset provided by [20] was used"),
     and `declared` records what the paper says. Defaulting to `public` leaves
     every existing call unchanged.
+
+    Args:
+        ev_ids: The evidence ids of the pointer.
+        what: The material behind the reference.
+        dt: The data type token.
+        dt_r: The rationale of the data type.
+        decl: The `declared` token; `none_stated` when the pointer is in
+            body text with no availability statement.
+        decl_r: The rationale of `declared`.
+
+    Returns:
+        An `insufficiently_specified` axis.
     """
     where = (
         "The statement locates"
@@ -747,11 +1006,22 @@ def ref_pointer(
     )
 
 
-def host_only(ev_ids, name, what, gran="raw"):
-    """The boundary `named_no_route` must not swallow: a source is named and the
+def host_only(ev_ids: list[int], name: str, what: str, gran: str = "raw") -> dict:
+    """Build Axis A for a named source with no dataset identified inside it.
+
+    The boundary `named_no_route` must not swallow: a source is named and the
     material inside it is not, so the reader still cannot tell what was used.
-    `insufficiently_specified` is correct here and S91's hand-read found 10 rows
-    of this shape in one batch window, so the distinction is not rare.
+    `insufficiently_specified` is correct here and S91's hand-read found 10
+    rows of this shape in one batch window, so the distinction is not rare.
+
+    Args:
+        ev_ids: The evidence ids that support the case.
+        name: The source the paper names.
+        what: The material taken from it.
+        gran: The granularity token.
+
+    Returns:
+        An `insufficiently_specified` axis.
     """
     return mkaxis(
         "insufficiently_specified",
@@ -775,8 +1045,27 @@ def host_only(ev_ids, name, what, gran="raw"):
     )
 
 
-def own_code(ids, repos, ev_ids, what="the code that generated the results", pinned="unpinned_url"):
-    """P2: the authors' own code, publicly released, with a resolvable id."""
+def own_code(
+    ids: list[str],
+    repos: list[str],
+    ev_ids: list[int],
+    what: str = "the code that generated the results",
+    pinned: str = "unpinned_url",
+) -> dict:
+    """Build Axis B for the authors' own code, publicly released (P2).
+
+    The code has an identifier a third party can resolve.
+
+    Args:
+        ids: The identifiers given, verbatim.
+        repos: The repository type tokens.
+        ev_ids: The evidence ids of the statement.
+        what: What the statement offers.
+        pinned: The pinning token.
+
+    Returns:
+        An `openly_accessible` axis.
+    """
     return mkaxis(
         "openly_accessible",
         "medium",
@@ -800,8 +1089,18 @@ def own_code(ids, repos, ev_ids, what="the code that generated the results", pin
     )
 
 
-def code_unreachable(ev_ids, what="the code that generated the results"):
-    """P2 + P4: the authors' own code, but the pointer does not resolve."""
+def code_unreachable(ev_ids: list[int], what: str = "the code that generated the results") -> dict:
+    """Build Axis B for the authors' own code behind an unresolved pointer.
+
+    P2 + P4: the authors' own code, but the pointer does not resolve.
+
+    Args:
+        ev_ids: The evidence ids of the statement.
+        what: What the statement offers.
+
+    Returns:
+        An `insufficiently_specified` axis.
+    """
     return mkaxis(
         "insufficiently_specified",
         "medium",
@@ -822,8 +1121,19 @@ def code_unreachable(ev_ids, what="the code that generated the results"):
     )
 
 
-def third_party_code(ev_ids, name, what="the results"):
-    """P2 boundary: the statement names somebody else's software."""
+def third_party_code(ev_ids: list[int], name: str, what: str = "the results") -> dict:
+    """Build Axis B for a statement that names somebody else's software.
+
+    The P2 boundary: nothing of the authors' own is made available.
+
+    Args:
+        ev_ids: The evidence ids of the statement.
+        name: The software the statement names.
+        what: What is left without a route.
+
+    Returns:
+        An `access_not_provided` axis.
+    """
     return mkaxis(
         "access_not_provided",
         "medium",
@@ -845,8 +1155,17 @@ def third_party_code(ev_ids, name, what="the results"):
     )
 
 
-def promise(ev_ids, what="the data", due=True):
-    """P5: a future-tense promise with no current route and no identifier."""
+def promise(ev_ids: list[int], what: str = "the data", due: bool = True) -> dict:
+    """Build an axis for a future-tense promise with no current route (P5).
+
+    Args:
+        ev_ids: The evidence ids of the statement.
+        what: What is promised.
+        due: Not used; kept so existing batch builders still call.
+
+    Returns:
+        An `insufficiently_specified` axis.
+    """
     return mkaxis(
         "insufficiently_specified",
         "medium",
@@ -867,9 +1186,15 @@ def promise(ev_ids, what="the data", due=True):
 
 
 def gated(
-    ev_ids, what="the data", restriction="none_given", dt=None, dt_r=None, gran=None, gran_r=None
-):
-    """P9: an on-request route, with or without a restriction attached.
+    ev_ids: list[int],
+    what: str = "the data",
+    restriction: str = "none_given",
+    dt: str | None = None,
+    dt_r: str | None = None,
+    gran: str | None = None,
+    gran_r: str | None = None,
+) -> dict:
+    """Build an axis for an on-request route, with or without a restriction (P9).
 
     `dt`/`gran` added 4 Oct (S164) and both default to the old behaviour, so
     every existing call is unchanged. They exist because the hard-coded
@@ -882,6 +1207,19 @@ def gated(
 
     Pass `dt` only where the retrieved text says what the material is. Leaving
     it off is still the right answer whenever the statement is all there is.
+
+    Args:
+        ev_ids: The evidence ids of the statement.
+        what: What is offered on request.
+        restriction: The restriction token attached to the offer.
+        dt: The data type token, where the text says what the material is;
+            None records `unclear`.
+        dt_r: The rationale of the data type.
+        gran: The granularity token; None records `unclear`.
+        gran_r: The rationale of the granularity.
+
+    Returns:
+        An `on_request` axis.
     """
     return mkaxis(
         "on_request",
@@ -906,15 +1244,15 @@ def gated(
 
 
 def restricted(
-    ev_ids,
-    what,
-    restriction,
-    why,
-    dt="real",
-    gran="unclear",
-    gran_r="not characterised in the retrieved text",
-):
-    """A statement that refuses a deposit outright and gives its reason.
+    ev_ids: list[int],
+    what: str,
+    restriction: str,
+    why: str,
+    dt: str = "real",
+    gran: str = "unclear",
+    gran_r: str = "not characterised in the retrieved text",
+) -> dict:
+    """Build an axis for a statement that refuses a deposit and gives its reason.
 
     Added 4 Oct (S159). `explicitly_restricted` was the last case in
     `schema.py` with no builder here, and 18 stored row-axes had been
@@ -928,6 +1266,18 @@ def restricted(
     18 use privacy 5, third_party 3, confidential 3, commercial 2,
     other_stated 2, and one each of proprietary, intellectual_property and
     size_technical. Pass `why` as the paper's own reason, in its own terms.
+
+    Args:
+        ev_ids: The evidence ids of the statement.
+        what: What the statement refuses to share.
+        restriction: The author's stated ground, a `Restriction` token.
+        why: The paper's own reason, in its own terms.
+        dt: The data type token.
+        gran: The granularity token.
+        gran_r: The rationale of the granularity.
+
+    Returns:
+        An `explicitly_restricted` axis, declared `restricted`.
     """
     return mkaxis(
         "explicitly_restricted",
@@ -949,8 +1299,17 @@ def restricted(
     )
 
 
-def tool_no_results(name="the released package"):
-    """P8: the contribution is the tool; no results are reported alongside."""
+def tool_no_results(name: str = "the released package") -> dict:
+    """Build Axis B for a tool paper that reports no results (P8).
+
+    The contribution is the tool; no results are reported alongside.
+
+    Args:
+        name: The tool, as it reads in the rationale.
+
+    Returns:
+        A `not_applicable` axis.
+    """
     return mkaxis(
         "not_applicable",
         "medium",

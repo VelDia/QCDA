@@ -26,10 +26,14 @@ import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Iterator, Optional
+from typing import TYPE_CHECKING, Iterable, Iterator, Optional
 
 from .redact import redact
 from .schema import FLAT_COLUMNS, SCHEME_VERSION, PaperRecord
+
+if TYPE_CHECKING:
+    from .classify import Usage
+    from .verify import VerificationResult
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS papers (
@@ -193,9 +197,18 @@ PREPRINT_DOI_PREFIXES: tuple[str, ...] = (
 
 
 def _scheme_family(version: Optional[str]) -> object:
-    """The part of a scheme_version that must match for rows to pool: major and
-    minor. Patch versions mark rulings on the same vocabulary (Diana, 28 Oct).
-    Anything that is not dotted numbers, NULL included, is its own family.
+    """Return the part of a scheme version that must match for rows to pool.
+
+    That part is the major and minor numbers. Patch versions mark rulings on
+    the same vocabulary (Diana, 28 Oct). Anything that is not dotted numbers,
+    NULL included, is its own family.
+
+    Args:
+        version: A `scheme_version` value as stored, or None.
+
+    Returns:
+        A `(major, minor)` tuple for a version of three dotted numbers,
+        otherwise `version` itself.
     """
     parts = (version or "").split(".")
     if len(parts) == 3 and all(p.isdigit() for p in parts):
@@ -204,7 +217,29 @@ def _scheme_family(version: Optional[str]) -> object:
 
 
 class Store:
-    def __init__(self, path: str | Path):
+    """The pipeline's state: one SQLite database, safe to share across threads.
+
+    Each thread gets its own connection, opened on first use. Methods that
+    change a paper's standing by hand (the `requeue_*` family, `exclude`,
+    `adjudicate`, `adopt`) return an empty string on success and the reason
+    for a refusal otherwise, and log what they did to the `failures` table.
+
+    Attributes:
+        path: The path of the database file.
+        STAGES: The stages a paper moves through, in order.
+        RETRIEVAL_KEYS: The `meta_json` keys the retrieve stage adds, which a
+            requeue strips.
+        REMOVED: The statuses that take a paper out of the corpus while
+            keeping its row.
+    """
+
+    def __init__(self, path: str | Path) -> None:
+        """Open the database, creating or upgrading its tables as needed.
+
+        Args:
+            path: The path of the SQLite file. It is created if it does not
+                exist.
+        """
         self.path = str(path)
         self._local = threading.local()
         with self._conn() as c:
@@ -236,6 +271,9 @@ class Store:
         A database that already holds duplicates gets a warning and no index,
         not an exception: refusing to open it would leave the operator unable to
         run the `exclude` that fixes it.
+
+        Args:
+            c: An open connection to the database.
         """
         try:
             c.execute(
@@ -260,6 +298,18 @@ class Store:
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
+        """Provide this thread's connection, rolling back on an exception.
+
+        The connection is opened on first use, in autocommit mode with WAL
+        journalling, and reused for the life of the thread.
+
+        Yields:
+            The thread's `sqlite3.Connection`, with `sqlite3.Row` rows.
+
+        Raises:
+            Exception: Whatever the caller's block raised, re-raised after any
+                open transaction has been rolled back.
+        """
         conn = getattr(self._local, "conn", None)
         if conn is None:
             conn = sqlite3.connect(self.path, timeout=60, isolation_level=None)
@@ -284,11 +334,19 @@ class Store:
 
     # -- enrolment ---------------------------------------------------------
     def enrol(self, rows: Iterable[dict]) -> int:
-        """Add corpus rows as `pending`. Idempotent — re-running never duplicates.
+        """Add corpus rows as `pending`. Idempotent: re-running never duplicates.
 
         A row may carry the harvest's `year`. Storing it lets the batch window
         skip an old paper before the metadata stage spends requests on it; the
         metadata stage still overwrites it with OpenAlex's year.
+
+        Args:
+            rows: The papers to add. Each needs `openalex_id` and may carry
+                `doi`, `arm` and `year`.
+
+        Returns:
+            The number of rows actually inserted; rows already enrolled are not
+            counted.
         """
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         n = 0
@@ -313,6 +371,16 @@ class Store:
         return n
 
     def pending(self, limit: Optional[int] = None, arm: Optional[str] = None) -> list[dict]:
+        """List the papers that are pending, or failed with attempts left.
+
+        Args:
+            limit: The most papers to return, or None for all of them.
+            arm: Restrict the list to one study arm, or None for every arm.
+
+        Returns:
+            One dict per paper with `openalex_id`, `doi`, `arm` and `attempts`,
+            fewest attempts first.
+        """
         q = (
             "SELECT openalex_id, doi, arm, attempts FROM papers "
             "WHERE status IN ('pending','failed') AND attempts < ?"
@@ -328,7 +396,18 @@ class Store:
             return [dict(r) for r in c.execute(q, args)]
 
     # -- results -----------------------------------------------------------
-    def save(self, rec: PaperRecord, verifications: list = ()) -> None:
+    def save(
+        self, rec: PaperRecord, verifications: Iterable[tuple[str, VerificationResult]] = ()
+    ) -> None:
+        """Store a finished record with its evidence and verification results.
+
+        The paper's status becomes `done` and its evidence rows are replaced.
+
+        Args:
+            rec: The validated record.
+            verifications: The verification results as `(axis, result)` pairs,
+                where `axis` is `"axis_a"` or `"axis_b"`.
+        """
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         flat = rec.flat()
         with self._conn() as c:
@@ -371,6 +450,19 @@ class Store:
         *,
         permanent: bool = False,
     ) -> None:
+        """Record a failure and count an attempt against the paper.
+
+        The message is redacted before it is stored, so no contact address or
+        key reaches the database.
+
+        Args:
+            openalex_id: The paper that failed.
+            stage: The stage it failed at.
+            error_type: A short name for the kind of failure.
+            message: The error text; stored redacted and cut to 2,000 characters.
+            permanent: Whether to park the paper as `dead` rather than `failed`,
+                so it is not retried.
+        """
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         with self._conn() as c:
             c.execute("BEGIN")
@@ -386,10 +478,16 @@ class Store:
             )
             c.execute("COMMIT")
 
-    def record_usage(self, openalex_id: str, usage, *, discount: float = 1.0) -> None:
-        """`discount` is 0.5 for work billed through the Message Batches API, so
-        the running cost meter reflects what is actually spent rather than the
-        synchronous list price.
+    def record_usage(self, openalex_id: str, usage: Usage, *, discount: float = 1.0) -> None:
+        """Record the token use and cost of one model call.
+
+        Args:
+            openalex_id: The paper the call was made for.
+            usage: The model and token counts of the call.
+            discount: The factor applied to the list price. It is 0.5 for work
+                billed through the Message Batches API, so the running cost
+                meter reflects what is actually spent rather than the
+                synchronous list price.
         """
         with self._conn() as c:
             c.execute(
@@ -406,6 +504,11 @@ class Store:
             )
 
     def total_cost(self) -> float:
+        """Sum the cost of every recorded model call.
+
+        Returns:
+            The total in USD.
+        """
         with self._conn() as c:
             row = c.execute("SELECT COALESCE(SUM(cost_usd),0) AS t FROM usage").fetchone()
             return float(row["t"])
@@ -429,6 +532,9 @@ class Store:
 
         Read-only with respect to everything else: it touches one column, only
         where it is NULL, and only from a value already stored in that same row.
+
+        Returns:
+            The number of rows whose year was filled in.
         """
         with self._conn() as c:
             cur = c.execute(
@@ -441,8 +547,16 @@ class Store:
     def years(
         self, *, stage: Optional[str] = None, coded_only: bool = False
     ) -> dict[Optional[int], int]:
-        """Publication year histogram. `coded_only` counts only papers that
-        carry a classification, which is what "reviewed papers" means.
+        """Count papers by publication year.
+
+        Args:
+            stage: Count only papers at this stage, or None for every stage.
+            coded_only: Count only papers that carry a classification, which is
+                what "reviewed papers" means.
+
+        Returns:
+            The number of papers per year, newest first. The key None counts
+            papers whose year is not known.
         """
         q = "SELECT year, COUNT(*) AS n FROM papers WHERE 1=1"
         args: list = []
@@ -466,7 +580,7 @@ class Store:
         publisher_doi_only: bool = False,
         skip_coded_dois: bool = False,
     ) -> list[dict]:
-        """Papers sitting at `stage` and still workable.
+        """List the papers sitting at a stage that are still workable.
 
         `year_min` drops papers published before it. A paper whose year is not
         yet known is KEPT, not dropped: the year arrives with the metadata
@@ -488,6 +602,22 @@ class Store:
         `is_classified` keys on the id, so without this the same paper is coded
         twice under two ids. Measured on dap_frame: 259 publisher DOIs are held
         by two rows, and 74 of those have one copy coded and one still queued.
+
+        Args:
+            stage: The stage to claim work from.
+            limit: The most papers to return.
+            arm: Restrict the claim to one study arm, or None for every arm.
+            year_min: Drop papers published before this year. A paper whose year
+                is not yet known is kept.
+            newest_first: Whether to order by publication year, newest first,
+                before the number of attempts.
+            publisher_doi_only: Whether to drop preprint and repository records.
+            skip_coded_dois: Whether to drop rows whose DOI is already carried by
+                a finished paper.
+
+        Returns:
+            One dict per paper with `openalex_id`, `doi`, `arm`, `attempts` and
+            `meta` (the stored metadata, decoded).
         """
         q = (
             "SELECT openalex_id, doi, arm, meta_json, attempts FROM papers "
@@ -533,6 +663,14 @@ class Store:
             return out
 
     def advance(self, openalex_id: str, stage: str, meta: dict | None = None) -> None:
+        """Move a paper to a stage and mark it pending there.
+
+        Args:
+            openalex_id: The paper to move.
+            stage: The stage it has reached.
+            meta: The paper's metadata to store, replacing what is there. None
+                leaves the stored metadata as it is.
+        """
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         with self._conn() as c:
             if meta is None:
@@ -557,6 +695,11 @@ class Store:
                 )
 
     def stage_counts(self) -> dict[str, int]:
+        """Count papers by stage and status.
+
+        Returns:
+            The number of papers under each `"<stage>/<status>"` key.
+        """
         with self._conn() as c:
             return {
                 f"{r['stage']}/{r['status']}": r["n"]
@@ -570,6 +713,15 @@ class Store:
     def record_batch(
         self, *, batch_id: str, model: str, n: int, members: list[tuple[str, dict]]
     ) -> None:
+        """Record a submitted batch and move its papers to `classify_queued`.
+
+        Args:
+            batch_id: The id the Message Batches API gave the batch.
+            model: The model the batch's requests use.
+            n: The number of requests in the batch.
+            members: The requests as `(custom_id, meta)` pairs; each `meta` holds
+                the paper's `openalex_id`.
+        """
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         with self._conn() as c:
             c.execute("BEGIN")
@@ -588,6 +740,11 @@ class Store:
             c.execute("COMMIT")
 
     def open_batches(self) -> list[str]:
+        """List the batches whose results have not been collected.
+
+        Returns:
+            The ids of the open batches, oldest first.
+        """
         with self._conn() as c:
             return [
                 r["batch_id"]
@@ -597,6 +754,14 @@ class Store:
             ]
 
     def batch_members(self, batch_id: str) -> dict[str, dict]:
+        """Look up the papers of a batch.
+
+        Args:
+            batch_id: The batch to look up.
+
+        Returns:
+            The spooled metadata of each request, by `custom_id`.
+        """
         with self._conn() as c:
             return {
                 r["custom_id"]: json.loads(r["meta_json"])
@@ -606,18 +771,40 @@ class Store:
             }
 
     def batch_model(self, batch_id: str) -> str:
+        """Look up the model a batch was submitted with.
+
+        Args:
+            batch_id: The batch to look up.
+
+        Returns:
+            The model id, or an empty string if the batch is not recorded.
+        """
         with self._conn() as c:
             r = c.execute("SELECT model FROM batches WHERE batch_id=?", (batch_id,)).fetchone()
             return r["model"] if r else ""
 
     def close_batch(self, batch_id: str) -> None:
+        """Mark a batch as collected.
+
+        Args:
+            batch_id: The batch to close.
+        """
         with self._conn() as c:
             c.execute("UPDATE batches SET status='closed' WHERE batch_id=?", (batch_id,))
 
     def paper_meta(self, openalex_id: str) -> dict:
-        """Full stored metadata for one paper, passages included. The batch spool
-        keeps only a slim copy (no passages, no DAS text), so anything that must
-        check a result against what the model was shown reads it from here.
+        """Read the full stored metadata of one paper, passages included.
+
+        The batch spool keeps only a slim copy (no passages, no DAS text), so
+        anything that must check a result against what the model was shown reads
+        it from here.
+
+        Args:
+            openalex_id: The paper to read.
+
+        Returns:
+            The stored metadata, or an empty dict if the paper is not enrolled or
+            has none.
         """
         with self._conn() as c:
             r = c.execute(
@@ -632,6 +819,13 @@ class Store:
         than in them: the codes describe the version of record. It lives in
         `meta_json` under a key that `requeue_for_recode` does not strip, so it
         survives the recode that brings in the published text.
+
+        Args:
+            openalex_id: The paper the preprint belongs to.
+            result: The finding to store under the `preprint_das` key.
+
+        Returns:
+            An empty string on success, or `"not enrolled"`.
         """
         with self._conn() as c:
             c.execute("BEGIN")
@@ -650,12 +844,26 @@ class Store:
         return ""
 
     def is_classified(self, openalex_id: str) -> bool:
+        """Tell whether a paper has reached the classified stage or beyond.
+
+        Args:
+            openalex_id: The paper to check.
+
+        Returns:
+            True if the paper is at `classified`, `verified` or `done`.
+        """
         with self._conn() as c:
             r = c.execute("SELECT stage FROM papers WHERE openalex_id=?", (openalex_id,)).fetchone()
             return bool(r) and r["stage"] in ("classified", "verified", "done")
 
-    def save_classified(self, rec, *, batch_id: str = "") -> None:
-        """Store a classified record and advance it to the verify stage."""
+    def save_classified(self, rec: PaperRecord, *, batch_id: str = "") -> None:
+        """Store a classified record and advance it to the verify stage.
+
+        Args:
+            rec: The validated record.
+            batch_id: The batch the record came from; empty for the synchronous
+                and manual paths.
+        """
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         with self._conn() as c:
             c.execute("BEGIN")
@@ -683,9 +891,15 @@ class Store:
             c.execute("COMMIT")
 
     def requeue_for_sync(self, openalex_id: str, *, reason: str) -> None:
-        """A batch result that failed schema validation. There is no
-        conversation to continue in a batch, so it goes back to the synchronous
-        path where the validator's complaint can be handed to the model.
+        """Send a batch result that failed schema validation to the synchronous path.
+
+        There is no conversation to continue in a batch, so the paper goes back
+        to the synchronous path, where the validator's complaint can be handed to
+        the model.
+
+        Args:
+            openalex_id: The paper to send back.
+            reason: The validator's complaint, recorded in `failures`.
         """
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         with self._conn() as c:
@@ -727,6 +941,13 @@ class Store:
         classification is refused: its codes were judged against the text it
         has, and swapping that text underneath them would detach the codes from
         their evidence. The requeue is logged to `failures` as an audit trail.
+
+        Args:
+            openalex_id: The paper to send back.
+            reason: Why the stored text is wrong; recorded in `failures`.
+
+        Returns:
+            An empty string on success, otherwise why the requeue was refused.
         """
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         with self._conn() as c:
@@ -772,6 +993,13 @@ class Store:
         so the stored text and metadata are untouched.
 
         Returns "" on success, otherwise why it was refused.
+
+        Args:
+            openalex_id: The paper to give another try.
+            reason: Why the attempts are cleared; recorded in `failures`.
+
+        Returns:
+            An empty string on success, otherwise why it was refused.
         """
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         with self._conn() as c:
@@ -830,6 +1058,14 @@ class Store:
         coder's is how a two-coder study loses the thing it is measuring — use
         `requeue_for_recode` and its audit trail for that. Returns "" on
         success, else the refusal.
+
+        Args:
+            openalex_id: The paper to send back to the classifier.
+            reason: Why it is reclassified; recorded in `failures` with the stub
+                that is discarded.
+
+        Returns:
+            An empty string on success, otherwise why it was refused.
         """
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         with self._conn() as c:
@@ -903,6 +1139,14 @@ class Store:
         Deliberately not reversible in place: the previous record is written to
         `failures` before it is cleared, so the audit trail holds what was
         discarded and why.
+
+        Args:
+            openalex_id: The paper to start over.
+            reason: Why its text and codes are discarded; recorded in `failures`
+                with the record that is discarded.
+
+        Returns:
+            An empty string on success, otherwise why it was refused.
         """
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         with self._conn() as c:
@@ -961,6 +1205,17 @@ class Store:
         The record, evidence and verifications are kept as they are, so an
         exclusion is reversible and nothing about the paper is lost. The reason
         goes to `failures`. Returns "" on success, else the refusal.
+
+        Args:
+            openalex_id: The paper to remove.
+            reason: Why it is removed; recorded in `failures`.
+            as_status: The status to give it: `"excluded"` or `"outdated"`.
+
+        Returns:
+            An empty string on success, otherwise why it was refused.
+
+        Raises:
+            ValueError: If `as_status` is not one of `REMOVED`.
         """
         if as_status not in self.REMOVED:
             raise ValueError(f"as_status must be one of {self.REMOVED}, not {as_status!r}")
@@ -1008,6 +1263,16 @@ class Store:
         `reverify` sends the paper back to the verify stage — required whenever
         an identifier changed, because `Actual` is written only by verify.py.
         Returns "" on success, else the refusal.
+
+        Args:
+            rec: The adjudicated record. It is validated before anything is
+                written, so `SchemaError` propagates from an invalid one.
+            reason: Why the codes are replaced; recorded in `failures` with the
+                record that is replaced.
+            reverify: Whether to send the paper back to the verify stage.
+
+        Returns:
+            An empty string on success, otherwise why it was refused.
         """
         rec.validate()
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -1070,6 +1335,14 @@ class Store:
         is refused too, since pooling versions is what `export_csv` guards
         against. The adoption and its source go to `failures`. Returns "" on
         success, else the refusal.
+
+        Args:
+            src_path: The database to copy the paper from.
+            openalex_id: The paper to copy.
+            reason: Why it is adopted; recorded in `failures` with its source.
+
+        Returns:
+            An empty string on success, otherwise why it was refused.
         """
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         src = sqlite3.connect(str(src_path), timeout=60)
@@ -1127,6 +1400,11 @@ class Store:
         return ""
 
     def counts(self) -> dict[str, int]:
+        """Count papers by status.
+
+        Returns:
+            The number of papers under each status.
+        """
         with self._conn() as c:
             return {
                 r["status"]: r["n"]
@@ -1140,12 +1418,29 @@ class Store:
         evidence_path: str | Path | None = None,
         review_path: str | Path | None = None,
     ) -> dict[str, int]:
-        """Write the analysis view. Rows whose scheme_versions differ in major
-        or minor refuse to export together — the vocabulary differs, and
-        pooling them is exactly the silent corruption we are guarding against.
-        A patch difference (2.0.0 beside 2.0.1) pools: a patch records a ruling
-        on how the same tokens are applied, and the scheme_version column keeps
-        every row traceable to the ruling it was coded or recoded under.
+        """Write the analysis view of the finished papers.
+
+        Rows whose scheme versions differ in major or minor refuse to export
+        together: the vocabulary differs, and pooling them is exactly the silent
+        corruption we are guarding against. A patch difference (2.0.0 beside
+        2.0.1) pools: a patch records a ruling on how the same tokens are
+        applied, and the scheme_version column keeps every row traceable to the
+        ruling it was coded or recoded under.
+
+        Args:
+            analysis_path: Where to write one row per finished paper, with the
+                columns of `FLAT_COLUMNS`.
+            evidence_path: Where to write every evidence quote, or None to skip.
+            review_path: Where to write the papers flagged for human review, or
+                None to skip.
+
+        Returns:
+            The number of rows written to each file, under the keys `analysis`,
+            `evidence` and `review_queue` (the last two only when written).
+
+        Raises:
+            RuntimeError: If the finished rows span scheme versions that differ
+                in more than the patch number.
         """
         with self._conn() as c:
             versions = [

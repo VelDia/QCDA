@@ -42,7 +42,7 @@ SCHEME_VERSION = "2.0.1"
 
 
 class _Tok(str, Enum):
-    """Base: members are their own stable machine token.
+    """Base class of every controlled vocabulary: members are their own token.
 
     Stored data and analysis code reference `.value` (the token), never the
     human-readable label. Relabelling for publication is then a documentation
@@ -50,19 +50,39 @@ class _Tok(str, Enum):
     """
 
     def __str__(self) -> str:  # so f-strings and csv writers emit the token
+        """Return the token, so f-strings and CSV writers emit it.
+
+        Returns:
+            The member's value.
+        """
         return self.value
 
     @classmethod
     def tokens(cls) -> set[str]:
+        """Return every token of this vocabulary.
+
+        Returns:
+            The set of member values.
+        """
         return {m.value for m in cls}
 
     @classmethod
-    def coerce(cls, v: Any) -> "_Tok":
-        """Accept only an exact token. Raises SchemaError otherwise.
+    def coerce(cls, v: object) -> "_Tok":
+        """Accept only an exact token of this vocabulary.
 
         Deliberately strict: no case-folding, no whitespace stripping, no
         synonym table. A near-miss means the prompt or the model is wrong and
         we want to see it, not paper over it.
+
+        Args:
+            v: A member of this vocabulary, or the exact string of one of its
+                tokens.
+
+        Returns:
+            The member of this vocabulary that `v` names.
+
+        Raises:
+            SchemaError: If `v` is neither a member nor an exact token.
         """
         if isinstance(v, cls):
             return v
@@ -81,6 +101,22 @@ class SchemaError(ValueError):
 # Cases — applied identically to both axes
 # ---------------------------------------------------------------------------
 class Case(_Tok):
+    """The access state of one axis's data; applied identically to both axes.
+
+    Attributes:
+        NOT_APPLICABLE: The axis does not apply: no external data analysed
+            (Axis A), or nothing generated (Axis B).
+        OPENLY_ACCESSIBLE: A concrete identifier is given: a DOI, URL,
+            accession number or repository.
+        ACCESS_NOT_PROVIDED: The material is identifiable but no path to it is
+            given.
+        INSUFFICIENTLY_SPECIFIED: The material cannot even be identified.
+        ACCESS_UNRESOLVABLE: A specific path is given, and it fails. Derived
+            from a failed verification, never asserted from text.
+        ON_REQUEST: Offered on contact, however hedged.
+        EXPLICITLY_RESTRICTED: Stated that the data cannot be shared.
+    """
+
     NOT_APPLICABLE = "not_applicable"
     OPENLY_ACCESSIBLE = "openly_accessible"
     ACCESS_NOT_PROVIDED = "access_not_provided"
@@ -130,6 +166,15 @@ OPENNESS_RANK: dict[Case, Optional[int]] = {
 # Supporting vocabularies
 # ---------------------------------------------------------------------------
 class DataType(_Tok):
+    """Whether an axis's data is empirical or computationally generated.
+
+    Attributes:
+        REAL: Empirical or measured data, including processed measurements.
+        SYNTHETIC: Simulated or computationally generated data.
+        MIXED: Both real and synthetic data.
+        UNCLEAR: The paper does not make the kind of data clear.
+    """
+
     REAL = "real"  # empirical/measured, incl. processed measurements
     SYNTHETIC = "synthetic"  # simulated / computationally generated
     MIXED = "mixed"
@@ -137,7 +182,15 @@ class DataType(_Tok):
 
 
 class Declared(_Tok):
-    """What the paper SAYS. Extracted from text/metadata only."""
+    """What the paper SAYS about access. Extracted from text/metadata only.
+
+    Attributes:
+        PUBLIC: The paper states that the data is publicly available.
+        ON_REQUEST: The paper offers the data on request.
+        RESTRICTED: The paper states that access is restricted.
+        NONE_STATED: The paper says nothing about access.
+        UNCLEAR: What the paper says about access cannot be determined.
+    """
 
     PUBLIC = "public"
     ON_REQUEST = "on_request"
@@ -147,7 +200,21 @@ class Declared(_Tok):
 
 
 class Actual(_Tok):
-    """What VERIFICATION found. Only `verify.py` may set anything but NOT_ATTEMPTED."""
+    """What VERIFICATION found for a declared access path.
+
+    Only `verify.py` may set anything but NOT_ATTEMPTED.
+
+    Attributes:
+        ACCESSIBLE: The path resolves and delivers the data.
+        PAYWALLED: The path leads to a paywall.
+        AUTH_REQUIRED: The path requires a login.
+        NOT_FOUND: The path does not resolve.
+        RESOLVES_NO_DATA: The landing page loads but the dataset is absent.
+        ERROR: The check did not complete (a timeout, a DNS failure, a 503).
+            This is not a failed check and does not change the case.
+        NOT_ATTEMPTED: No verification has been run.
+        NOT_APPLICABLE: There is no access path to verify.
+    """
 
     ACCESSIBLE = "accessible"
     PAYWALLED = "paywalled"
@@ -160,7 +227,14 @@ class Actual(_Tok):
 
 
 class Pinned(_Tok):
-    """Granularity of the access path — separate from whether it works."""
+    """Granularity of the access path, separate from whether it works.
+
+    Attributes:
+        DOI_VERSIONED: A versioned dataset DOI.
+        COMMIT_PINNED: A git commit, tag or release.
+        UNPINNED_URL: A bare URL or a repository root.
+        NONE: No access path is given.
+    """
 
     DOI_VERSIONED = "doi_versioned"  # versioned dataset DOI
     COMMIT_PINNED = "commit_pinned"  # git commit / tag / release
@@ -169,6 +243,16 @@ class Pinned(_Tok):
 
 
 class Granularity(_Tok):
+    """The processing level at which an axis's data is offered.
+
+    Attributes:
+        RAW: Raw data only.
+        PROCESSED: Processed data only.
+        BOTH: Both raw and processed data.
+        UNCLEAR: The paper does not make the level clear.
+        NOT_APPLICABLE: The axis does not apply.
+    """
+
     RAW = "raw"
     PROCESSED = "processed"
     BOTH = "both"
@@ -177,7 +261,22 @@ class Granularity(_Tok):
 
 
 class Restriction(_Tok):
-    """Reason accompanying Case.EXPLICITLY_RESTRICTED. Never inferred."""
+    """Reason accompanying `Case.EXPLICITLY_RESTRICTED`. Never inferred.
+
+    Attributes:
+        PROPRIETARY: The data is proprietary.
+        CONFIDENTIAL: The data is confidential.
+        INTELLECTUAL_PROP: Intellectual-property grounds.
+        COMMERCIAL: Commercial grounds.
+        INSTITUTIONAL: An institutional policy.
+        THIRD_PARTY: The data belongs to a third party.
+        VENDOR_HARDWARE: A hardware vendor's terms, e.g. a QPU vendor NDA.
+        EXPORT_CONTROL: Export-control rules.
+        PRIVACY: Privacy of the data subjects.
+        SIZE_TECHNICAL: The data is too large, or other technical grounds.
+        OTHER_STATED: Another reason, stated in the paper.
+        NONE_GIVEN: No reason is given.
+    """
 
     PROPRIETARY = "proprietary"
     CONFIDENTIAL = "confidential"
@@ -194,8 +293,31 @@ class Restriction(_Tok):
 
 
 class RepoType(_Tok):
-    """Deliberately spans physics, ML and systems — the v1 list was physics-only,
+    """The kind of repository an access path points to.
+
+    Deliberately spans physics, ML and systems: the v1 list was physics-only,
     which would have coded most of the ML arm as `other`.
+
+    Attributes:
+        ZENODO: Zenodo.
+        FIGSHARE: Figshare.
+        DRYAD: Dryad.
+        OSF: The Open Science Framework.
+        GITHUB: GitHub.
+        GITLAB: GitLab.
+        HUGGINGFACE: Hugging Face.
+        KAGGLE: Kaggle.
+        OPENML: OpenML.
+        PAPERSWITHCODE: Papers with Code.
+        IEEE_DATAPORT: IEEE DataPort.
+        MATERIALS_CLOUD: Materials Cloud.
+        INSTITUTIONAL: An institutional repository.
+        PUBLISHER_SUPP: The publisher's supplementary material.
+        DOMAIN_ARCHIVE: A domain archive, e.g. UCI, PDB or the ImageNet host.
+        CLOUD_BUCKET: A cloud storage link (S3, GCS, Azure).
+        PERSONAL_SITE: A personal or group website.
+        OTHER: A repository of a kind not listed here.
+        UNKNOWN: The kind of repository cannot be determined.
     """
 
     ZENODO = "zenodo"
@@ -220,8 +342,22 @@ class RepoType(_Tok):
 
 
 class PaperType(_Tok):
-    """Needed for matching across arms — quantum has far more pure theory, and
-    an unmatched comparison would measure that instead of sharing practice.
+    """The kind of work a paper reports.
+
+    Needed for matching across arms: quantum has far more pure theory, and an
+    unmatched comparison would measure that instead of sharing practice.
+
+    Attributes:
+        THEORY: Theoretical work.
+        SIMULATION: A simulation study.
+        EXPERIMENTAL: Experimental work.
+        SYSTEMS_BUILD: A system that was built.
+        BENCHMARK_STUDY: A benchmark study.
+        DATASET_PAPER: A paper that presents a dataset.
+        TOOL_PAPER: A paper that presents a tool.
+        SURVEY_REVIEW: A survey or review.
+        POSITION: A position paper.
+        UNCLEAR: The kind of work cannot be determined.
     """
 
     THEORY = "theory"
@@ -237,6 +373,19 @@ class PaperType(_Tok):
 
 
 class Arm(_Tok):
+    """The study arm of a paper. Metadata, not part of the coding scheme.
+
+    Attributes:
+        QUANTUM_COMPUTING: Quantum computing.
+        MACHINE_LEARNING: Machine learning.
+        HPC_SYSTEMS: High-performance computing and systems.
+        OTHER_CS: Other computer science.
+        OUT_OF_SCOPE: Outside the study's scope.
+        UNSPECIFIED: No arm. The general tool has no arms, so every paper of
+            a new corpus carries this value; the others stay so case-study
+            databases still load.
+    """
+
     QUANTUM_COMPUTING = "quantum_computing"
     MACHINE_LEARNING = "machine_learning"
     HPC_SYSTEMS = "hpc_systems"
@@ -249,12 +398,30 @@ class Arm(_Tok):
 
 
 class Confidence(_Tok):
+    """How certain the classifier is of a judgement.
+
+    Attributes:
+        HIGH: High confidence; requires at least one piece of evidence.
+        MEDIUM: Medium confidence.
+        LOW: Low confidence; a low-confidence case routes the paper to human
+            review.
+    """
+
     HIGH = "high"
     MEDIUM = "medium"
     LOW = "low"
 
 
 class Retrieval(_Tok):
+    """How much of a paper the classifier was given.
+
+    Attributes:
+        METADATA_ONLY: Classified from Crossref/DataCite metadata alone.
+        FULL_TEXT: The full text was retrieved.
+        PARTIAL_TEXT: Only the abstract or front matter was retrieved.
+        FAILED: Nothing could be retrieved.
+    """
+
     METADATA_ONLY = "metadata_only"  # classified from Crossref/DataCite alone
     FULL_TEXT = "full_text"
     PARTIAL_TEXT = "partial_text"  # abstract / front matter only
@@ -262,6 +429,21 @@ class Retrieval(_Tok):
 
 
 class TextSource(_Tok):
+    """Where the text of a paper was retrieved from.
+
+    Attributes:
+        CROSSREF_TDM: A text-mining link deposited in Crossref.
+        OPENALEX_OA: An open-access location listed by OpenAlex.
+        UNPAYWALL: A location found through Unpaywall.
+        ARXIV: arXiv.
+        PMC: PubMed Central.
+        CORE: CORE.
+        PUBLISHER_TDM_API: A publisher's text-mining API.
+        LOCAL_PDF: A PDF fetched by hand for a paper the OA cascade may not
+            reach.
+        NONE: No text was retrieved.
+    """
+
     CROSSREF_TDM = "crossref_tdm"
     OPENALEX_OA = "openalex_oa"
     UNPAYWALL = "unpaywall"
@@ -286,6 +468,12 @@ class Judgement:
     point into the record's evidence list. A judgement with no evidence and
     HIGH confidence is rejected by validate() — the model cannot assert
     certainty it has no warrant for.
+
+    Attributes:
+        value: The classified value: a token of the field's vocabulary.
+        confidence: How certain the classifier is of the value.
+        rationale: One sentence on why this value was chosen.
+        evidence_ids: The ids of the evidence items that support the value.
     """
 
     value: Any
@@ -296,6 +484,25 @@ class Judgement:
     def validate(
         self, vocab: type[_Tok] | None, *, field_name: str, allow_unwarranted: bool = False
     ) -> "Judgement":
+        """Check this judgement against its vocabulary and the warrant rules.
+
+        Args:
+            vocab: The vocabulary `value` must belong to, or None to leave the
+                value unchecked.
+            field_name: The name of the field, used in error messages.
+            allow_unwarranted: Whether HIGH confidence is accepted without
+                evidence. Set for machine-set fields, which carry no quote.
+
+        Returns:
+            This judgement, with `value` and `confidence` coerced to members of
+            their vocabularies.
+
+        Raises:
+            SchemaError: If the value or confidence is not a valid token, if the
+                rationale is empty or longer than 600 characters, or if
+                confidence is HIGH with no evidence and `allow_unwarranted` is
+                not set.
+        """
         if vocab is not None:
             self.value = vocab.coerce(self.value)
         self.confidence = Confidence.coerce(self.confidence)
@@ -310,6 +517,16 @@ class Judgement:
 
 @dataclass(slots=True)
 class Evidence:
+    """A verbatim quote that supports one or more judgements.
+
+    Attributes:
+        id: The number judgements refer to; unique within a record.
+        quote: The quoted text: verbatim, at most 40 words, never paraphrased.
+        section: The section of the paper the quote is from.
+        locator: The page number or DOM anchor; empty if unknown.
+        source: The retrieval source the quote came from.
+    """
+
     id: int
     quote: str  # verbatim, <= 40 words, never paraphrased
     section: str = ""
@@ -317,6 +534,14 @@ class Evidence:
     source: str = ""  # which retrieval source this came from
 
     def validate(self) -> "Evidence":
+        """Check that the quote is present and short enough.
+
+        Returns:
+            This evidence item.
+
+        Raises:
+            SchemaError: If the quote is empty or longer than 40 words.
+        """
         q = self.quote.strip()
         if not q:
             raise SchemaError(f"evidence[{self.id}]: empty quote")
@@ -327,8 +552,31 @@ class Evidence:
 
 @dataclass(slots=True)
 class AxisRecord:
-    """One axis of one paper. Field names are axis-neutral so Axis A and Axis B
-    are structurally identical — which is what makes them comparable.
+    """One axis of one paper.
+
+    Field names are axis-neutral so Axis A and Axis B are structurally
+    identical, which is what makes them comparable.
+
+    Attributes:
+        case: The access state of this axis's data (`Case`).
+        data_type: Empirical or computationally generated (`DataType`).
+        declared: What the paper says about access (`Declared`).
+        actual: What verification found (`Actual`). Set by `verify.py`, not
+            by the model.
+        granularity: The processing level of the data (`Granularity`).
+        pinned: How precisely the access path is pinned.
+        restriction: The stated reason for a restriction.
+        repo_types: The kinds of repository the access paths point to.
+        identifiers: The DOIs and URLs given, verbatim.
+        names: The dataset or source names given.
+        generation_code: Axis B: whether the generating code is given; None
+            if not assessed.
+        generation_params: Axis B: whether the generation parameters are
+            given; None if not assessed.
+        seed_specified: Axis B: whether the random seed is given; None if not
+            assessed.
+        environment_specified: Axis B: whether the software environment is
+            given; None if not assessed.
     """
 
     case: Judgement
@@ -349,6 +597,23 @@ class AxisRecord:
     environment_specified: Optional[bool] = None
 
     def validate(self, axis: str) -> "AxisRecord":
+        """Check every field of this axis and the rules that tie them together.
+
+        Args:
+            axis: The name of the axis (`"axis_a"` or `"axis_b"`), used in error
+                messages.
+
+        Returns:
+            This record, with every value coerced to a member of its vocabulary.
+
+        Raises:
+            SchemaError: If a value is not a valid token, or if a cross-field
+                rule is broken: `not_applicable` with identifiers or
+                repositories, `openly_accessible` with no identifier,
+                `explicitly_restricted` with no reason, `access_unresolvable`
+                with no failed verification, or `on_request` when the paper does
+                not declare it.
+        """
         self.case.validate(Case, field_name=f"{axis}.case")
         self.data_type.validate(DataType, field_name=f"{axis}.data_type")
         self.declared.validate(Declared, field_name=f"{axis}.declared")
@@ -389,6 +654,36 @@ class AxisRecord:
 
 @dataclass(slots=True)
 class PaperRecord:
+    """The complete coded record of one paper.
+
+    Attributes:
+        openalex_id: The paper's OpenAlex id.
+        doi: The paper's DOI; empty if it has none.
+        title: The paper's title.
+        year: The publication year, or None if unknown.
+        venue: The journal or conference.
+        arm: The study arm.
+        paper_type: The kind of work the paper reports (`PaperType`).
+        axis_a: The record of Axis A, external data.
+        axis_b: The record of Axis B, self-generated data.
+        evidence: The quotes the judgements refer to.
+        das_present: Whether the paper carries a data availability statement.
+        das_source: Where that statement was found: `crossref_assertion`,
+            `full_text` or `none`.
+        needs_human_review: Whether the paper is routed to the review queue.
+        review_reason: Why the paper needs review; required when it does.
+        scheme_version: The version of the coding scheme the record was coded
+            under.
+        prompt_version: The version of the classifier prompt.
+        model_id: The model, or the manual coder, that produced the record.
+        retrieval: How much of the paper the classifier was given.
+        text_source: Where the text was retrieved from.
+        text_url: The URL of the copy that was read.
+        processed_at: When the record was produced, as an ISO timestamp.
+        input_tokens: The input tokens the classification used.
+        output_tokens: The output tokens the classification used.
+    """
+
     openalex_id: str
     doi: str
     title: str
@@ -415,6 +710,17 @@ class PaperRecord:
     output_tokens: int = 0
 
     def validate(self) -> "PaperRecord":
+        """Check the whole record: both axes, the evidence and the review flag.
+
+        Returns:
+            This record, with every value coerced to a member of its vocabulary.
+
+        Raises:
+            SchemaError: If `openalex_id` is empty, a value is not a valid token,
+                an axis breaks a cross-field rule, an evidence id is duplicated
+                or referenced but missing, a review is flagged without a reason,
+                or a low-confidence case is not flagged for review.
+        """
         if not self.openalex_id:
             raise SchemaError("openalex_id is required")
         self.arm = Arm.coerce(self.arm)
@@ -455,13 +761,19 @@ class PaperRecord:
     # -- derived, for analysis --------------------------------------------
     @property
     def is_purely_theoretical(self) -> bool:
+        """Whether both axes independently return `not_applicable`."""
         return (
             self.axis_a.case.value is Case.NOT_APPLICABLE
             and self.axis_b.case.value is Case.NOT_APPLICABLE
         )
 
     def flat(self) -> dict[str, Any]:
-        """One flat row for CSV/SQL export. Tokens only, never labels."""
+        """Flatten the record into one row for CSV/SQL export.
+
+        Returns:
+            A dict of plain values keyed by the names in `FLAT_COLUMNS`. Tokens
+            only, never labels.
+        """
         out: dict[str, Any] = dict(
             openalex_id=self.openalex_id,
             doi=self.doi,
@@ -547,6 +859,16 @@ FLAT_COLUMNS: list[str] = list(
 # JSON Schema for the model's constrained output (Anthropic tool-use input_schema)
 # ---------------------------------------------------------------------------
 def _judgement_schema(vocab: type[_Tok], desc: str) -> dict:
+    """Build the JSON Schema of one judgement for the classification tool.
+
+    Args:
+        vocab: The vocabulary the judgement's value must come from.
+        desc: The description of the field shown to the model.
+
+    Returns:
+        The JSON Schema object for a `{value, confidence, rationale,
+        evidence_ids}` judgement.
+    """
     return {
         "type": "object",
         "description": desc,
@@ -567,6 +889,14 @@ def _judgement_schema(vocab: type[_Tok], desc: str) -> dict:
 
 
 def _axis_schema(axis_label: str) -> dict:
+    """Build the JSON Schema of one axis for the classification tool.
+
+    Args:
+        axis_label: The description of the axis shown to the model.
+
+    Returns:
+        The JSON Schema object for the axis.
+    """
     return {
         "type": "object",
         "description": axis_label,
@@ -659,8 +989,13 @@ CLASSIFICATION_TOOL_SCHEMA: dict = {
 
 
 def describe_scheme() -> str:
-    """Human-readable rendering of the case scheme, injected into the prompt so
-    the prompt and the validator can never disagree about the vocabulary.
+    """Render the case scheme as text for the classifier prompt.
+
+    Injected into the prompt so the prompt and the validator can never
+    disagree about the vocabulary.
+
+    Returns:
+        The case vocabulary, one numbered line per case token.
     """
     lines = ["CASE VOCABULARY (choose exactly one token per axis):"]
     for case in Case:

@@ -64,11 +64,20 @@ CONFIDENCES = [c.value for c in Confidence]
 
 
 def load_copies(db: Path, ids: list[str]) -> dict[str, dict]:
-    """Where each paper can be read, and the passages the pipeline stored.
+    """Find where each paper can be read, and the passages the pipeline stored.
 
     Opened read-only: SQLite is the pipeline's state and this app never writes
     it. Only meta_json is read -- record_json holds the classifier's codes and
     rationale, and the page must not see them.
+
+    Args:
+        db: The pipeline database. A missing file gives an empty result.
+        ids: The OpenAlex ids of the papers under review.
+
+    Returns:
+        For each id found, a dict with `links` (the copies of the paper:
+        `name`, `url`, whether it is a PDF, and whether it is the copy the
+        pipeline read), `text_source`, and `passages` (`keywords` and `text`).
     """
     if not db.exists():
         return {}
@@ -116,7 +125,30 @@ def load_copies(db: Path, ids: list[str]) -> dict[str, dict]:
 
 
 class Store:
-    def __init__(self, path: Path, db: Path):
+    """The review CSV, held in memory and written back on every save.
+
+    A one-time copy of the original file is kept beside it as `<csv>.bak`.
+
+    Attributes:
+        path: The CSV file under review.
+        lock: Serialises saves from the server's request threads.
+        fields: The CSV columns, with the human-review columns appended.
+        rows: The CSV rows, one dict per paper.
+        copies: Reading links and stored passages by OpenAlex id (see
+            `load_copies`).
+    """
+
+    def __init__(self, path: Path, db: Path) -> None:
+        """Load the CSV, back it up once and read the papers' copies.
+
+        Args:
+            path: The CSV file under review.
+            db: The pipeline database to read copies and passages from. It is
+                opened read-only and may be missing.
+
+        Raises:
+            SystemExit: If `openalex_id` is not unique in the CSV.
+        """
         self.path = path
         self.lock = threading.Lock()
         backup = path.with_suffix(path.suffix + ".bak")
@@ -128,7 +160,13 @@ class Store:
             raise SystemExit("openalex_id is not unique in the CSV; refusing to start")
         self.copies = load_copies(db, ids)
 
-    def _read(self):
+    def _read(self) -> tuple[list[str], list[dict]]:
+        """Read the CSV and add the human-review columns it lacks.
+
+        Returns:
+            A tuple `(fields, rows)`: the column names, and one dict per row with
+            every human-review column present (empty where not yet filled).
+        """
         with open(self.path, newline="", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             fields = list(reader.fieldnames)
@@ -141,7 +179,8 @@ class Store:
                 r.setdefault(col, "")
         return fields, rows
 
-    def _write(self):
+    def _write(self) -> None:
+        """Write every row back to the CSV atomically, through a temporary file."""
         tmp = self.path.with_suffix(self.path.suffix + ".tmp")
         with open(tmp, "w", newline="", encoding="utf-8") as f:
             w = csv.DictWriter(f, fieldnames=self.fields, lineterminator="\n")
@@ -149,7 +188,14 @@ class Store:
             w.writerows(self.rows)
         os.replace(tmp, self.path)
 
-    def public_rows(self):
+    def public_rows(self) -> list[dict]:
+        """List the rows as the page may see them.
+
+        Returns:
+            One dict per paper with its identity, status, whether it has been
+            classified, and the human-review columns. The classifier's codes are
+            left out, so the review stays blind.
+        """
         out = []
         for r in self.rows:
             out.append(
@@ -166,7 +212,20 @@ class Store:
             )
         return out
 
-    def save(self, payload: dict):
+    def save(self, payload: dict) -> dict:
+        """Validate one review and write it to the CSV.
+
+        Args:
+            payload: The form's answer: `id` (the paper's OpenAlex id), `a_case`,
+                `b_case`, `confidence`, and optionally `evidence` and `notes`.
+
+        Returns:
+            The human-review columns as stored for that paper.
+
+        Raises:
+            ValueError: If a case or the confidence is not a token of the scheme,
+                or if `id` is not in the CSV.
+        """
         tokens = {c.value: c for c in Case}
         a, b = payload.get("a_case"), payload.get("b_case")
         conf = payload.get("confidence")
@@ -194,9 +253,27 @@ class Store:
             return {c: row[c] for c in NEW_COLS}
 
 
-def make_handler(store: Store):
+def make_handler(store: Store) -> type[BaseHTTPRequestHandler]:
+    """Build the HTTP request handler class for one review store.
+
+    Args:
+        store: The review the handler serves and saves to.
+
+    Returns:
+        A `BaseHTTPRequestHandler` subclass bound to `store`.
+    """
+
     class Handler(BaseHTTPRequestHandler):
-        def _send(self, code, body, ctype="application/json"):
+        """Serves the review page and its JSON API."""
+
+        def _send(self, code: int, body: str | bytes, ctype: str = "application/json") -> None:
+            """Send a complete response.
+
+            Args:
+                code: The HTTP status code.
+                body: The response body; text is encoded as UTF-8.
+                ctype: The media type, without the charset.
+            """
             data = body.encode("utf-8") if isinstance(body, str) else body
             self.send_response(code)
             self.send_header("Content-Type", ctype + "; charset=utf-8")
@@ -205,7 +282,8 @@ def make_handler(store: Store):
             self.end_headers()
             self.wfile.write(data)
 
-        def do_GET(self):
+        def do_GET(self) -> None:
+            """Serve the page, the row list, or one paper's copies and passages."""
             if self.path == "/":
                 self._send(200, PAGE, "text/html")
             elif self.path.startswith("/api/paper?"):
@@ -226,7 +304,8 @@ def make_handler(store: Store):
             else:
                 self._send(404, json.dumps({"error": "not found"}))
 
-        def do_POST(self):
+        def do_POST(self) -> None:
+            """Save one review; an invalid one is answered with 400 and the reason."""
             if self.path != "/api/save":
                 return self._send(404, json.dumps({"error": "not found"}))
             try:
@@ -236,7 +315,13 @@ def make_handler(store: Store):
                 return self._send(400, json.dumps({"error": str(e)}))
             self._send(200, json.dumps({"saved": saved}))
 
-        def log_message(self, fmt, *args):
+        def log_message(self, fmt: str, *args: object) -> None:
+            """Log saves only, to stderr; page and API reads are not logged.
+
+            Args:
+                fmt: The format string, as `BaseHTTPRequestHandler` passes it.
+                *args: The values for `fmt`.
+            """
             if self.command == "POST":
                 sys.stderr.write("%s\n" % (fmt % args))
 
@@ -492,7 +577,11 @@ load();
 </script></body></html>"""
 
 
-def main():
+def main() -> None:
+    """Start the review server on 127.0.0.1 and serve until interrupted.
+
+    Reads the command line: the CSV to review, `--port` and `--db`.
+    """
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("csv", nargs="?", default=str(HERE / "human_review.csv"))
     ap.add_argument("--port", type=int, default=8765)

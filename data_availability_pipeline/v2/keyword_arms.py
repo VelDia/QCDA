@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Assign the study arm from title keywords: `keyword_arms.csv`.
+r"""Assign the study arm from title keywords: `keyword_arms.csv`.
 
 Replaces two arm lists that disagreed. `frame_arms.csv` called every paper in
 a dedicated quantum venue quantum computing, physics included. `arms.csv`
@@ -21,7 +21,7 @@ Measured on 2017-2026 (371,367 papers), with the rule Diana chose on 25 Sep 2026
     published in quantum venues. Their stored arm is NOT rewritten; this file
     is joined at analysis time.
 
-    python keyword_arms.py --input ../../openalex_papers.csv --out keyword_arms.csv \\
+    python keyword_arms.py --input ../../openalex_papers.csv --out keyword_arms.csv \
         --year-min 2017 --year-max 2026
 
 Reads one CSV, writes one CSV. No network.
@@ -110,11 +110,31 @@ TIERS = ("tier1", "tier2", "post_quantum", "chemistry", "no_match")
 
 
 def _matches(title: str, table: dict) -> list[str]:
+    """List the terms of a pattern table that occur in a title.
+
+    Args:
+        title: The title, already lower-cased.
+        table: A mapping from term name to regular expression.
+
+    Returns:
+        The names of the terms whose pattern matches, in table order.
+    """
     return [k for k, p in table.items() if re.search(p, title)]
 
 
-def assign(title) -> tuple[str, str, list[str]]:
-    """(arm, tier, matched terms) for one title."""
+def assign(title: object) -> tuple[str, str, list[str]]:
+    """Assign the study arm of one paper from its title.
+
+    Args:
+        title: The paper's title. Anything that is not a string (a missing
+            value read by pandas, for example) is treated as an empty title.
+
+    Returns:
+        A tuple `(arm, tier, matched_terms)`. `arm` is `"quantum_computing"`
+        or `"out_of_scope"`; `tier` names the rule that decided (`tier1`,
+        `tier2`, `post_quantum`, `chemistry` or `no_match`); `matched_terms`
+        lists the terms that produced the assignment.
+    """
     t = title.lower() if isinstance(title, str) else ""
     t1, t2 = _matches(t, TIER1), _matches(t, TIER2)
     if re.search(POST_QUANTUM, t) and set(t1) <= GENERIC:
@@ -136,6 +156,14 @@ def assign(title) -> tuple[str, str, list[str]]:
 
 
 def main() -> int:
+    """Assign an arm to every paper of the harvest and write `keyword_arms.csv`.
+
+    Reads the command line (`--input`, `--out`, `--year-min`, `--year-max`)
+    and prints the arm and tier counts.
+
+    Returns:
+        The process exit status, always 0.
+    """
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True)
     ap.add_argument("--out", default="keyword_arms.csv")

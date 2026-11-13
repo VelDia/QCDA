@@ -6,7 +6,10 @@ drift is back.
     python -m pytest tests/ -q          (or: python tests/test_guards.py)
 """
 
+from __future__ import annotations
+
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -18,9 +21,24 @@ except ImportError:  # minimal stand-in so the
     from contextlib import contextmanager
 
     class _P:
+        """A minimal stand-in for pytest, so the suite runs without it."""
+
         @staticmethod
         @contextmanager
-        def raises(exc, match=None):
+        def raises(exc: type[BaseException], match: str | None = None) -> Iterator[None]:
+            """Assert that the block raises an exception, as `pytest.raises` does.
+
+            Args:
+                exc: The exception type the block must raise.
+                match: A regular expression the message must match, or None.
+
+            Yields:
+                Nothing; the block under test runs at the yield.
+
+            Raises:
+                AssertionError: If the block raises nothing, or raises `exc` with a
+                    message that does not match.
+            """
             try:
                 yield
             except exc as e:
@@ -32,7 +50,15 @@ except ImportError:  # minimal stand-in so the
                 raise AssertionError(f"{exc.__name__} was not raised")
 
         @staticmethod
-        def main(_argv):
+        def main(_argv: list[str]) -> int:
+            """Run every `test_*` function of the module being run.
+
+            Args:
+                _argv: The command line; ignored.
+
+            Returns:
+                The exit status: 1 if any test failed, else 0.
+            """
             # Introspect the module being RUN, not this shim's module — otherwise
             # importing the shim elsewhere silently re-runs this file's tests.
             g = dict(vars(sys.modules["__main__"]))
@@ -75,18 +101,40 @@ from dap.sources import looks_like_article, repo_type_for
 from dap.verify import classify_pinning, derive_case
 
 
-def J(v, conf=Confidence.HIGH, ids=(1,)):
+def J(v: object, conf: Confidence = Confidence.HIGH, ids: tuple[int, ...] = (1,)) -> Judgement:
+    """Build a judgement with a stock rationale.
+
+    Args:
+        v: The value.
+        conf: The confidence.
+        ids: The evidence ids that support the value.
+
+    Returns:
+        The judgement, not yet validated.
+    """
     return Judgement(v, conf, "because the evidence says so", list(ids))
 
 
 def axis(
-    case=Case.ACCESS_NOT_PROVIDED,
+    case: Case = Case.ACCESS_NOT_PROVIDED,
     *,
-    identifiers=(),
-    declared=Declared.NONE_STATED,
-    actual=Actual.NOT_ATTEMPTED,
-    restriction=Restriction.NONE_GIVEN,
-):
+    identifiers: tuple[str, ...] = (),
+    declared: Declared = Declared.NONE_STATED,
+    actual: Actual = Actual.NOT_ATTEMPTED,
+    restriction: Restriction = Restriction.NONE_GIVEN,
+) -> AxisRecord:
+    """Build an axis record with real, processed data.
+
+    Args:
+        case: The case.
+        identifiers: The identifiers given.
+        declared: What the paper declares.
+        actual: What verification found.
+        restriction: The stated restriction.
+
+    Returns:
+        The axis record, not yet validated.
+    """
     return AxisRecord(
         case=J(case),
         data_type=J(DataType.REAL),
@@ -98,7 +146,15 @@ def axis(
     )
 
 
-def paper(**kw):
+def paper(**kw: object) -> PaperRecord:
+    """Build a paper record that is valid unless overridden.
+
+    Args:
+        **kw: Fields of `PaperRecord` to replace.
+
+    Returns:
+        The record, not yet validated.
+    """
     base = dict(
         openalex_id="W1",
         doi="10.1/x",
@@ -122,7 +178,7 @@ def paper(**kw):
 
 
 # -- v1: `request`, `upon_request`, `available_on_request` all became values ---
-def test_out_of_vocabulary_token_is_rejected():
+def test_out_of_vocabulary_token_is_rejected() -> None:
     with pytest.raises(SchemaError, match="not a valid token"):
         Declared.coerce("upon_request")
     with pytest.raises(SchemaError):
@@ -131,7 +187,7 @@ def test_out_of_vocabulary_token_is_rejected():
 
 
 # -- v1: A_case held '1' and '1.0' as distinct values -------------------------
-def test_numeric_lookalikes_rejected():
+def test_numeric_lookalikes_rejected() -> None:
     with pytest.raises(SchemaError):
         Case.coerce(2)
     with pytest.raises(SchemaError):
@@ -139,14 +195,14 @@ def test_numeric_lookalikes_rejected():
 
 
 # -- v1: 25 papers claiming "data available" with no link were coded Case 1 ----
-def test_openly_accessible_requires_an_identifier():
+def test_openly_accessible_requires_an_identifier() -> None:
     with pytest.raises(SchemaError, match="requires at least one identifier"):
         paper(axis_b=axis(Case.OPENLY_ACCESSIBLE, identifiers=())).validate()
     paper(axis_b=axis(Case.OPENLY_ACCESSIBLE, identifiers=["10.5281/zenodo.123"])).validate()
 
 
 # -- v1: `inaccessible` never appeared; the case was asserted, never derived ---
-def test_unresolvable_cannot_be_asserted_without_failed_verification():
+def test_unresolvable_cannot_be_asserted_without_failed_verification() -> None:
     with pytest.raises(SchemaError, match="derived from a failed verification"):
         paper(
             axis_b=axis(
@@ -155,7 +211,7 @@ def test_unresolvable_cannot_be_asserted_without_failed_verification():
         ).validate()
 
 
-def test_derive_case_promotes_on_broken_link():
+def test_derive_case_promotes_on_broken_link() -> None:
     c, note = derive_case(Case.OPENLY_ACCESSIBLE, Actual.NOT_FOUND)
     assert c is Case.ACCESS_UNRESOLVABLE and "not_found" in note
     c, _ = derive_case(Case.OPENLY_ACCESSIBLE, Actual.ACCESSIBLE)
@@ -166,7 +222,7 @@ def test_derive_case_promotes_on_broken_link():
 
 
 # -- v1: restriction reasons were free text, or absent entirely ----------------
-def test_explicit_restriction_needs_a_reason():
+def test_explicit_restriction_needs_a_reason() -> None:
     with pytest.raises(SchemaError, match="requires a restriction reason"):
         paper(axis_b=axis(Case.EXPLICITLY_RESTRICTED)).validate()
     paper(
@@ -174,13 +230,13 @@ def test_explicit_restriction_needs_a_reason():
     ).validate()
 
 
-def test_on_request_must_match_declared():
+def test_on_request_must_match_declared() -> None:
     with pytest.raises(SchemaError, match="requires declared=on_request"):
         paper(axis_b=axis(Case.ON_REQUEST, declared=Declared.PUBLIC)).validate()
 
 
 # -- v1: an axis coded "no data" while carrying repository fields --------------
-def test_not_applicable_cannot_carry_identifiers():
+def test_not_applicable_cannot_carry_identifiers() -> None:
     with pytest.raises(SchemaError, match="absent and present at once"):
         paper(
             axis_a=axis(Case.NOT_APPLICABLE, identifiers=["https://zenodo.org/records/1"])
@@ -188,14 +244,14 @@ def test_not_applicable_cannot_carry_identifiers():
 
 
 # -- v1: confidence was only ever high/medium across 1,290 judgement calls -----
-def test_high_confidence_requires_evidence():
+def test_high_confidence_requires_evidence() -> None:
     with pytest.raises(SchemaError, match="requires at least one evidence_id"):
         Judgement(Case.OPENLY_ACCESSIBLE, Confidence.HIGH, "sure", []).validate(
             Case, field_name="axis_a.case"
         )
 
 
-def test_rationale_is_mandatory():
+def test_rationale_is_mandatory() -> None:
     with pytest.raises(SchemaError, match="rationale is required"):
         Judgement(Case.ON_REQUEST, Confidence.MEDIUM, "   ", [1]).validate(
             Case, field_name="axis_a.case"
@@ -203,27 +259,27 @@ def test_rationale_is_mandatory():
 
 
 # -- v1: 209 flagged in analysis.csv vs 195 in review_queue.csv ----------------
-def test_low_confidence_forces_review():
+def test_low_confidence_forces_review() -> None:
     a = axis(Case.ACCESS_NOT_PROVIDED)
     a.case.confidence = Confidence.LOW
     with pytest.raises(SchemaError, match="must route to the review queue"):
         paper(axis_b=a, needs_human_review=False).validate()
 
 
-def test_dangling_evidence_id_is_caught():
+def test_dangling_evidence_id_is_caught() -> None:
     a = axis(Case.ACCESS_NOT_PROVIDED)
     a.case.evidence_ids = [99]
     with pytest.raises(SchemaError, match=r"evidence_ids \[99\] do not exist"):
         paper(axis_b=a).validate()
 
 
-def test_quote_length_is_capped():
+def test_quote_length_is_capped() -> None:
     with pytest.raises(SchemaError, match="limit is 40"):
         Evidence(1, " ".join(["word"] * 41)).validate()
 
 
 # -- v1: overlapping keyword windows dropped the second keyword's context ------
-def test_overlapping_passages_merge_and_keep_all_keywords():
+def test_overlapping_passages_merge_and_keep_all_keywords() -> None:
     text = (
         ("Preamble. " * 40)
         + "The data availability statement says the dataset is on zenodo. "
@@ -235,7 +291,7 @@ def test_overlapping_passages_merge_and_keep_all_keywords():
     assert {"data availability", "dataset", "zenodo"} <= kws
 
 
-def test_passages_returned_in_document_order():
+def test_passages_returned_in_document_order() -> None:
     text = (
         ("A " * 300)
         + "zenodo record here. "
@@ -248,31 +304,31 @@ def test_passages_returned_in_document_order():
 
 
 # -- v1: a Cloudflare challenge page returning 200 was parsed as article text --
-def test_bot_challenge_page_is_rejected():
+def test_bot_challenge_page_is_rejected() -> None:
     challenge = "Just a moment... Checking your browser before accessing. " * 50
     assert not looks_like_article(challenge, "Superconducting qubit coherence")
 
 
-def test_wrong_paper_is_rejected_by_title_overlap():
+def test_wrong_paper_is_rejected_by_title_overlap() -> None:
     body = "quantum annealing lattice gauge chromodynamics simulation " * 200
     assert not looks_like_article(body, "Transmon readout fidelity improvements")
     matching = "transmon readout fidelity improvements were measured " * 200
     assert looks_like_article(matching, "Transmon readout fidelity improvements")
 
 
-def test_short_stub_is_rejected():
+def test_short_stub_is_rejected() -> None:
     assert not looks_like_article("Abstract only. " * 5, "Some title")
 
 
 # -- repository typing is deterministic, not left to the model ----------------
-def test_repo_type_detection():
+def test_repo_type_detection() -> None:
     assert repo_type_for("https://huggingface.co/datasets/x") is RepoType.HUGGINGFACE
     assert repo_type_for("10.5281/zenodo.7654321") is RepoType.ZENODO
     assert repo_type_for("https://github.com/o/r") is RepoType.GITHUB
     assert repo_type_for("https://ieee-dataport.org/x") is RepoType.IEEE_DATAPORT
 
 
-def test_pinning_takes_the_most_specific():
+def test_pinning_takes_the_most_specific() -> None:
     assert classify_pinning(["https://github.com/o/r"]) is Pinned.UNPINNED_URL
     assert (
         classify_pinning(["https://github.com/o/r", "https://github.com/o/r/tree/a1b2c3d"])
@@ -282,7 +338,7 @@ def test_pinning_takes_the_most_specific():
 
 
 # -- the theory/simulation trap that mis-coded 364 v1 papers ------------------
-def test_purely_theoretical_requires_both_axes_absent():
+def test_purely_theoretical_requires_both_axes_absent() -> None:
     p = paper(axis_a=axis(Case.NOT_APPLICABLE), axis_b=axis(Case.NOT_APPLICABLE))
     p.validate()
     assert p.is_purely_theoretical
@@ -292,7 +348,7 @@ def test_purely_theoretical_requires_both_axes_absent():
     assert not p2.is_purely_theoretical
 
 
-def test_openness_rank_is_ordinal_where_case_number_is_not():
+def test_openness_rank_is_ordinal_where_case_number_is_not() -> None:
     from dap.schema import CASE_NUMBER, OPENNESS_RANK
 
     assert CASE_NUMBER[Case.ON_REQUEST] > CASE_NUMBER[Case.ACCESS_NOT_PROVIDED]
@@ -300,7 +356,7 @@ def test_openness_rank_is_ordinal_where_case_number_is_not():
     assert OPENNESS_RANK[Case.NOT_APPLICABLE] is None
 
 
-def test_flat_row_emits_tokens_not_labels():
+def test_flat_row_emits_tokens_not_labels() -> None:
     row = paper().flat()
     assert row["b_case"] == "access_not_provided"
     assert row["a_case_num"] == 1

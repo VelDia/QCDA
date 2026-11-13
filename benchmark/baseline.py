@@ -44,6 +44,7 @@ import os
 import sys
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -57,18 +58,41 @@ _lock = threading.Lock()
 # Providers. Each returns (reply_text, input_tokens, output_tokens, stop_reason).
 # ---------------------------------------------------------------------------
 class AnthropicProvider:
-    """Claude through the official SDK. No sampling parameters: current models
-    reject `temperature`, and thinking is adaptive by default. Streaming,
-    because full papers make long requests.
+    """Claude through the official SDK.
+
+    No sampling parameters: current models reject `temperature`, and thinking
+    is adaptive by default. Streaming, because full papers make long requests.
+
+    Attributes:
+        client: The `anthropic.Anthropic` client the requests are sent with.
+        model: The model id.
+        effort: The `output_config.effort` level, or None to leave it unset.
+        max_tokens: The output-token ceiling of each request.
     """
 
-    def __init__(self, model: str, effort: str | None, max_tokens: int):
+    def __init__(self, model: str, effort: str | None, max_tokens: int) -> None:
+        """Create the client from the environment's credentials.
+
+        Args:
+            model: The model id, e.g. `claude-opus-5-5`.
+            effort: The effort level to request, or None for the model default.
+            max_tokens: The output-token ceiling of each request.
+        """
         import anthropic
 
         self.client = anthropic.Anthropic()
         self.model, self.effort, self.max_tokens = model, effort, max_tokens
 
-    def __call__(self, system: str, user: str):
+    def __call__(self, system: str, user: str) -> tuple[str, int, int, str]:
+        """Send one request and wait for the complete reply.
+
+        Args:
+            system: The system prompt.
+            user: The user message: the paper header and its full text.
+
+        Returns:
+            A tuple `(reply_text, input_tokens, output_tokens, stop_reason)`.
+        """
         kw = dict(
             model=self.model,
             max_tokens=self.max_tokens,
@@ -84,8 +108,19 @@ class AnthropicProvider:
 
 
 class OpenAICompatibleProvider:
-    """POST {base_url}/chat/completions. Covers OpenAI, Gemini's and
-    OpenRouter's compatible endpoints, and local servers (Ollama, vLLM).
+    """Any endpoint that serves `POST {base_url}/chat/completions`.
+
+    Covers OpenAI, Gemini's and OpenRouter's compatible endpoints, and local
+    servers (Ollama, vLLM).
+
+    Attributes:
+        requests: The `requests` module, imported on construction.
+        model: The model id.
+        base: The base URL, without a trailing slash.
+        key: The API key, or an empty string when none is sent.
+        temperature: The sampling temperature, or None to omit it.
+        max_tokens: The completion-token ceiling; 0 omits it.
+        timeout: The request timeout in seconds.
     """
 
     def __init__(
@@ -96,7 +131,21 @@ class OpenAICompatibleProvider:
         temperature: float | None,
         max_tokens: int,
         timeout: float = 600,
-    ):
+    ) -> None:
+        """Read the API key and store the request settings.
+
+        Exits with a message if `api_key_env` names a variable that is not set.
+
+        Args:
+            model: The model id the endpoint expects.
+            base_url: The endpoint's base URL, e.g. `https://api.openai.com/v1`.
+            api_key_env: The environment variable that holds the API key. An
+                empty string sends no `Authorization` header (local servers).
+            temperature: The sampling temperature, or None to omit it, because
+                several current models reject it.
+            max_tokens: The completion-token ceiling; 0 omits it.
+            timeout: The request timeout in seconds.
+        """
         import requests
 
         self.requests = requests
@@ -106,7 +155,21 @@ class OpenAICompatibleProvider:
             sys.exit(f"{api_key_env} is not set")
         self.temperature, self.max_tokens, self.timeout = temperature, max_tokens, timeout
 
-    def __call__(self, system: str, user: str):
+    def __call__(self, system: str, user: str) -> tuple[str, int, int, str]:
+        """Send one chat completion request.
+
+        A 429 or 5xx answer is retried up to five times, waiting for
+        `Retry-After` or with exponential backoff.
+
+        Args:
+            system: The system prompt.
+            user: The user message: the paper header and its full text.
+
+        Returns:
+            A tuple `(reply_text, input_tokens, output_tokens, stop_reason)`.
+            `requests.HTTPError` propagates from any other error status, and
+            from the last answer once the retries are used up.
+        """
         body = {
             "model": self.model,
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
@@ -138,6 +201,16 @@ class OpenAICompatibleProvider:
 
 # ---------------------------------------------------------------------------
 def user_message(paper: dict, text: str) -> str:
+    """Build the user message for one paper.
+
+    Args:
+        paper: The gold row of the paper: `title`, `doi`, `publication_year`.
+        text: The paper's full text, already cut to the context limit. Empty
+            when no text was retrieved; the message then says so.
+
+    Returns:
+        The header (title, DOI, year) followed by the full text.
+    """
     head = (
         f"Title: {paper.get('title', '')}\n"
         f"DOI: {paper.get('doi', '')}   Year: {paper.get('publication_year', '')}\n\n"
@@ -150,7 +223,7 @@ def user_message(paper: dict, text: str) -> str:
 def run_one(
     paper: dict,
     *,
-    provider,
+    provider: Callable[[str, str], tuple[str, int, int, str]],
     system: str,
     texts: Path,
     max_chars: int,
@@ -158,6 +231,28 @@ def run_one(
     model: str,
     variant: str,
 ) -> dict:
+    """Ask one baseline about one paper and build its result row.
+
+    Nothing is raised for a failed request: the error is recorded in the row
+    (`ok` False), so the paper is retried by the next run.
+
+    Args:
+        paper: The gold row of the paper; `openalex_id` is required.
+        provider: The model to ask: called with `(system, user)`, returns
+            `(reply_text, input_tokens, output_tokens, stop_reason)`.
+        system: The system prompt (see `common.baseline_system`).
+        texts: The directory of cached full texts, one `<work id>.txt` each.
+        max_chars: The longest text given to the model; anything longer is
+            cut and the row is marked `truncated`.
+        name: The system name recorded in the row.
+        model: The model id recorded in the row.
+        variant: The prompt variant recorded in the row.
+
+    Returns:
+        The result row: provenance, timing, token counts, the raw reply, and
+        for each axis the case, the confidence, the quoted evidence and
+        whether that quote is in the text the model was given.
+    """
     w = wid(paper["openalex_id"])
     p = texts / f"{w}.txt"
     full = p.read_text(encoding="utf-8") if p.exists() else ""
@@ -201,6 +296,12 @@ def run_one(
 
 
 def main() -> None:
+    """Run one baseline over the gold papers, appending one JSON line each.
+
+    Reads the command line (see the module docstring), skips the papers the
+    output file already answers and runs the rest on a thread pool. Exits
+    with a message if the texts directory is empty.
+    """
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--gold", default=str(HERE / "gold" / "frame_review.csv"))
     ap.add_argument("--texts", default=str(HERE / "texts"))
@@ -256,7 +357,7 @@ def main() -> None:
         )
     system = baseline_system(a.variant)
 
-    def work(p):
+    def work(p: dict) -> None:
         row = run_one(
             p,
             provider=provider,

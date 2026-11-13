@@ -36,15 +36,40 @@ NDA_EQUIVALENT = {"on_request", "explicitly_restricted"}
 
 
 def wid(openalex_id: str) -> str:
+    """Return the bare work id from an OpenAlex identifier.
+
+    Args:
+        openalex_id: An OpenAlex id, either bare (`W123`) or as a URL
+            (`https://openalex.org/W123`). Empty or None gives an empty string.
+
+    Returns:
+        The last path segment of the id, e.g. `W123`.
+    """
     return (openalex_id or "").rstrip("/").rsplit("/", 1)[-1]
 
 
-def read_csv(path) -> list[dict]:
+def read_csv(path: str | Path) -> list[dict]:
+    """Read a UTF-8 CSV file into a list of rows.
+
+    Args:
+        path: The CSV file to read. Its first line is the header.
+
+    Returns:
+        One dict per data row, keyed by column name.
+    """
     with open(path, newline="", encoding="utf-8") as f:
         return list(csv.DictReader(f))
 
 
-def write_csv(path, rows: list[dict], fields: list[str] | None = None) -> None:
+def write_csv(path: str | Path, rows: list[dict], fields: list[str] | None = None) -> None:
+    """Write rows to a UTF-8 CSV file, creating parent directories as needed.
+
+    Args:
+        path: The file to write. An existing file is overwritten.
+        rows: The rows to write, one dict per row.
+        fields: The columns to write, in order. Defaults to the keys of the
+            first row; keys of a row that are not in `fields` are dropped.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fields = fields or (list(rows[0].keys()) if rows else [])
@@ -54,7 +79,15 @@ def write_csv(path, rows: list[dict], fields: list[str] | None = None) -> None:
         w.writerows(rows)
 
 
-def read_jsonl(path) -> list[dict]:
+def read_jsonl(path: str | Path) -> list[dict]:
+    """Read a JSON Lines file, skipping blank lines.
+
+    Args:
+        path: The `.jsonl` file to read, UTF-8.
+
+    Returns:
+        One decoded object per non-blank line, in file order.
+    """
     out = []
     with open(path, encoding="utf-8") as f:
         for line in f:
@@ -65,12 +98,35 @@ def read_jsonl(path) -> list[dict]:
 
 
 def agree(gold: str, pred: str, *, nda: bool) -> bool:
+    """Decide whether a predicted case counts as agreeing with the gold case.
+
+    Args:
+        gold: The human reviewer's case token.
+        pred: The system's case token.
+        nda: Whether the paper is an NDA row. On such a row `on_request` and
+            `explicitly_restricted` count as the same answer (see `NDA`).
+
+    Returns:
+        True if the tokens are equal, or if `nda` is set and both tokens are
+        in `NDA_EQUIVALENT`.
+    """
     if pred == gold:
         return True
     return nda and {gold, pred} <= NDA_EQUIVALENT
 
 
 def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
+    """Compute the Wilson score interval for a binomial proportion.
+
+    Args:
+        k: The number of successes.
+        n: The number of trials.
+        z: The normal quantile of the interval; 1.96 gives a 95% interval.
+
+    Returns:
+        The `(lower, upper)` bounds, clipped to [0, 1]. Both are NaN when `n`
+        is 0.
+    """
     if n == 0:
         return (float("nan"), float("nan"))
     p = k / n
@@ -81,8 +137,17 @@ def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
 
 
 def grounded(quote: str, text: str) -> bool | None:
-    """Is a quoted piece of evidence actually in the text the model was given?
-    The same normalisation the pipeline's grounding check uses.
+    """Check that a quoted piece of evidence is in the text the model was given.
+
+    Uses the same normalisation as the pipeline's grounding check.
+
+    Args:
+        quote: The evidence the model quoted. May be empty or None.
+        text: The text the model was given. May be empty or None.
+
+    Returns:
+        True if the normalised quote occurs in the normalised text, False if
+        it does not, and None if there is no quote to check.
     """
     q = _norm(quote or "")
     if not q:
@@ -133,6 +198,19 @@ Answer with one JSON object and nothing else:
 
 
 def baseline_system(variant: str) -> str:
+    """Build the system prompt for a baseline variant.
+
+    Args:
+        variant: `"definitions"` for the class definitions and the answer
+            format only, or `"pipeline_prompt"` for the pipeline's full system
+            prompt followed by the same answer format (the ablation).
+
+    Returns:
+        The system prompt text.
+
+    Raises:
+        ValueError: If `variant` is not one of the two known variants.
+    """
     if variant == "definitions":
         return DEFINITIONS
     if variant == "pipeline_prompt":
@@ -150,12 +228,23 @@ def baseline_system(variant: str) -> str:
 
 
 def parse_answer(text: str) -> tuple[dict, str]:
-    """The model's JSON answer, leniently located, strictly validated.
+    """Locate the model's JSON answer leniently and validate it strictly.
 
-    Returns ({axis_a:{case,confidence,evidence}, axis_b:{...}}, error). A case
-    that is not one of the seven tokens is INVALID: it is not mapped to the
-    nearest token, because a baseline that needs post-hoc repair is not doing
-    the task on its own.
+    A case that is not one of the seven tokens is INVALID: it is not mapped to
+    the nearest token, because a baseline that needs post-hoc repair is not
+    doing the task on its own.
+
+    Args:
+        text: The model's whole reply. The answer may be surrounded by prose
+            or code fences; the first JSON object that has an `axis_a` or
+            `axis_b` key is taken.
+
+    Returns:
+        A pair `(answer, error)`. `answer` is
+        `{"axis_a": {"case", "confidence", "evidence"}, "axis_b": {...}}`,
+        where `case` is a case token or `INVALID` and `confidence` is one of
+        `CONFIDENCES` or empty. `error` describes every problem found, joined
+        with `"; "`, and is empty when the answer is valid.
     """
     obj, err = None, "no JSON object in the reply"
     dec = json.JSONDecoder()
@@ -187,6 +276,17 @@ def parse_answer(text: str) -> tuple[dict, str]:
 
 
 def price(model: str, prices: dict | None = None) -> tuple[float, float] | None:
+    """Look up the price of a model.
+
+    Args:
+        model: The model id, as recorded in a run.
+        prices: Extra or overriding prices, as `{model: (input, output)}`.
+            They take precedence over the pipeline's `KNOWN_PRICES`.
+
+    Returns:
+        The `(input, output)` price in USD per million tokens, or None if the
+        model is in neither table.
+    """
     table = dict(KNOWN_PRICES)
     table.update(prices or {})
     return table.get(model)

@@ -1,4 +1,4 @@
-"""dap.classify — constrained classification.
+r"""dap.classify — constrained classification.
 
 The model never writes a value; it *chooses* one. Output is forced through the
 Anthropic tool-use `input_schema` built from `dap.schema`, so a token outside
@@ -8,7 +8,7 @@ in the prompt and the validator in `schema.py` are generated from the same enums
 so they cannot drift apart.
 
 Contrast with v1, which asked for JSON in prose, pulled it out with
-`re.search(r"\\{.*\\}", raw, re.DOTALL)` — greedy, so any stray brace before the
+`re.search(r"\{.*\}", raw, re.DOTALL)` — greedy, so any stray brace before the
 object broke it — capped output at 2000 tokens with no truncation check, and
 then flattened whatever came back straight into CSV.
 
@@ -28,7 +28,7 @@ import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from .schema import (
     CLASSIFICATION_TOOL_SCHEMA,
@@ -51,9 +51,13 @@ from .schema import (
     Retrieval,
     SchemaError,
     TextSource,
+    _Tok,
     describe_scheme,
 )
 from .sources import CITATION, fold_ligatures
+
+if TYPE_CHECKING:
+    import anthropic
 
 # v2.1.0 (28 Oct 2026): the NDA exception in the on_request vs
 # explicitly_restricted close pair (Diana's ruling, review_issues.md S219).
@@ -114,12 +118,32 @@ _NO_FORCED_TOOL = (
 
 
 def tool_choice_for(model: str) -> dict:
+    """Choose the `tool_choice` a model accepts.
+
+    Args:
+        model: The model id.
+
+    Returns:
+        `{"type": "auto"}` for a model that refuses forced tool use (see
+        `_NO_FORCED_TOOL`), otherwise the forced choice of
+        `record_classification`.
+    """
     if any(model.startswith(m) for m in _NO_FORCED_TOOL):
         return {"type": "auto"}
     return {"type": "tool", "name": "record_classification"}
 
 
 def max_tokens_for(model: str, base: int = 8000) -> int:
+    """Choose the output-token ceiling for a model.
+
+    Args:
+        model: The model id.
+        base: The ceiling for a model that does not always think.
+
+    Returns:
+        32000 for a model in `_NO_FORCED_TOOL`, whose thinking tokens count
+        against the ceiling, otherwise `base`.
+    """
     return 32000 if any(model.startswith(m) for m in _NO_FORCED_TOOL) else base
 
 
@@ -135,19 +159,37 @@ def build_request(
     model: str,
     title: str,
     venue: str,
-    year,
+    year: int | str | None,
     arm: Arm,
     openalex_id: str,
     crossref_summary: dict,
     passages: list[dict],
     max_tokens: int = 8000,
 ) -> dict:
-    """The Messages-API params for one paper.
+    """Build the Messages API parameters for one paper.
 
     Deliberately separated from the call so the same request serves both paths:
     synchronous (`classify`, for shakedowns and escalation) and the Message
     Batches API (`dap.batch`, for bulk). One request builder means the two paths
     cannot drift apart and produce differently-prompted rows in one corpus.
+
+    Args:
+        model: The model id.
+        title: The paper's title.
+        venue: The journal or conference.
+        year: The publication year.
+        arm: The study arm. Accepted for the callers' sake; it is not sent
+            to the model.
+        openalex_id: The paper's OpenAlex id. Not part of the request.
+        crossref_summary: The metadata facts shown to the model: `das_texts`,
+            `dataset_ids` and `confirmed_datasets`.
+        passages: The passages selected from the paper's text.
+        max_tokens: The output-token ceiling for a model that does not
+            always think.
+
+    Returns:
+        The keyword arguments for `client.messages.create`, or the `params`
+        of a batch request.
     """
     return {
         "model": model,
@@ -270,17 +312,28 @@ RULES THAT OVERRIDE EVERYTHING ELSE:
 
 @dataclass
 class Usage:
+    """The token use of the model calls made for one paper.
+
+    Attributes:
+        input_tokens: The input tokens used.
+        output_tokens: The output tokens used.
+        model: The model id the tokens were used on.
+    """
+
     input_tokens: int = 0
     output_tokens: int = 0
     model: str = ""
 
     @property
     def cost_usd(self) -> float:
+        """The cost in USD at the model's list price; 0 if the price is unknown."""
         pin, pout = _PRICES.get(self.model, (0.0, 0.0))
         return (self.input_tokens * pin + self.output_tokens * pout) / 1_000_000
 
 
 class ClassificationError(RuntimeError):
+    """The model could not produce a usable record for a paper."""
+
     pass
 
 
@@ -398,9 +451,18 @@ _STRONG_AVAILABILITY = frozenset(
 
 
 def _is_bibliography(chunk: str) -> bool:
-    """A keyword can match inside a cited paper's *title*, which put reference
-    lists in front of the classifier as though they were the paper. Three of the
-    18 papers in the first manual shakedown had nothing but bibliography.
+    """Tell whether a chunk of text reads as a reference list.
+
+    A keyword can match inside a cited paper's *title*, which put reference
+    lists in front of the classifier as though they were the paper. Three of
+    the 18 papers in the first manual shakedown had nothing but bibliography.
+
+    Args:
+        chunk: The text to test.
+
+    Returns:
+        True if the chunk has at least 40 words and its citation density
+        reaches `_BIBLIOGRAPHY_DENSITY` per 1,000 words.
     """
     n = len(chunk.split())
     if n < 40:
@@ -449,7 +511,7 @@ _STATEMENT_LINES = 6
 
 
 def strip_bibliography(text: str) -> str:
-    """The text with its reference list removed, for passage selection.
+    """Remove the reference list from a text, for passage selection.
 
     A keyword that matches inside a cited paper's title is evidence about what
     the paper cites, not about the paper. Filtering each selected passage by
@@ -468,6 +530,14 @@ def strip_bibliography(text: str) -> str:
 
     Only for passage selection. The completeness check counts citations in the
     full text and must see them.
+
+    Args:
+        text: The paper's full text.
+
+    Returns:
+        The text without the lines found to be bibliography. A line carrying
+        an explicit availability heading, and the statement after it, is
+        always kept.
     """
     if not text:
         return text
@@ -536,18 +606,36 @@ def strip_bibliography(text: str) -> str:
 
 
 def passage_text(text: str, sections: Optional[list] = None) -> str:
-    """The text passage selection may look at. GROBID already returns the body
-    without its bibliography, and its section offsets index the text as given,
-    so only structure-less parser output is stripped.
+    """Return the text that passage selection may look at.
+
+    GROBID already returns the body without its bibliography, and its section
+    offsets index the text as given, so only structure-less parser output is
+    stripped.
+
+    Args:
+        text: The paper's full text.
+        sections: The `(offset, heading)` pairs of a structured parse, or
+            None when the parser gave no structure.
+
+    Returns:
+        `text` unchanged when it has sections, otherwise `text` with its
+        reference list removed.
     """
     return text if sections else strip_bibliography(text)
 
 
 def only_bibliography(passages: list) -> bool:
-    """Is every passage selected for this paper reference-list text?
+    """Tell whether every passage selected for a paper is reference-list text.
 
     False when there are no passages at all -- that is a different condition,
     with the same remedy, and the caller checks it first.
+
+    Args:
+        passages: The selected passages, each with `text` and `keywords`.
+
+    Returns:
+        True if the passages together read as a reference list and none
+        carries an explicit availability heading.
     """
     if not passages:
         return False
@@ -561,9 +649,19 @@ def only_bibliography(passages: list) -> bool:
 
 
 def section_at(offset: int, sections: list) -> str:
-    """Which section does this character offset fall in? Sections arrive as
-    (offset, heading) in document order, so the answer is the last heading at or
-    before the offset.
+    """Find the section a character offset falls in.
+
+    Sections arrive as (offset, heading) in document order, so the answer is
+    the last heading at or before the offset.
+
+    Args:
+        offset: A character offset into the text.
+        sections: The `(offset, heading)` pairs, in document order. May be
+            empty or None.
+
+    Returns:
+        The heading of the section, or an empty string if the offset is
+        before the first heading or there are no sections.
     """
     name = ""
     for off, head in sections or []:
@@ -582,13 +680,26 @@ def select_passages(
     max_chars: int = 60_000,
     sections: Optional[list] = None,
 ) -> list[dict]:
-    """Deterministic keyword windows, merged properly.
+    """Select deterministic keyword windows from a text, merged properly.
 
     v1 skipped any window overlapping an earlier one, which silently dropped the
     second keyword's context and made the result depend on keyword list order.
     Here overlapping windows are merged into one span that keeps every keyword
     that fell inside it, and spans are returned in document order so the model
     sees the paper's own sequence.
+
+    Args:
+        text: The text to select from (see `passage_text`).
+        window: The number of characters kept on each side of a keyword.
+        max_passages: The most passages to keep; those with the strongest
+            availability signal are preferred.
+        max_chars: The most characters to return in total.
+        sections: The `(offset, heading)` pairs of a structured parse, used
+            to tag each passage with its section.
+
+    Returns:
+        The passages in document order, each a dict with `keywords`, `text`,
+        `offset` and `section`. Empty if no keyword matches.
     """
     if not text:
         return []
@@ -616,7 +727,7 @@ def select_passages(
             merged.append([s, e, set(kws), kwpos])
 
     # Prefer passages with the strongest availability signal when we must cut.
-    def weight(m) -> int:  # m = [start, end, keywords, first keyword offset]
+    def weight(m: list) -> int:  # m = [start, end, keywords, first keyword offset]
         kws = m[2]
         return (10 if kws & _STRONG_AVAILABILITY else 0) + len(kws)
 
@@ -653,7 +764,7 @@ def select_passages(
 
 
 def structural_passages(text: str, *, span: int = 1500) -> list[dict]:
-    """The opening and the back matter of a document that matched no keyword.
+    """Return the opening and the back matter of a text that matched no keyword.
 
     A pure-theory paper mentions no data, no repository and no availability, so
     it matches none of KEYWORDS and arrived at the classifier with nothing at
@@ -664,6 +775,14 @@ def structural_passages(text: str, *, span: int = 1500) -> list[dict]:
     Its first and last pages are enough to code it as theory with no data, from
     evidence rather than from a guess. A reference list is not evidence, so a
     bibliographic head or tail is left out and the gate still applies.
+
+    Args:
+        text: The paper's full text.
+        span: The number of characters taken from each end.
+
+    Returns:
+        Up to two passages, tagged `opening` and `closing`, each a dict with
+        `keywords` (empty), `text`, `offset` and `section`.
     """
     if not (text or "").strip():
         return []
@@ -684,8 +803,29 @@ def structural_passages(text: str, *, span: int = 1500) -> list[dict]:
 # The call
 # ---------------------------------------------------------------------------
 def _build_user_message(
-    *, title: str, venue: str, year, arm: Arm, crossref_summary: dict, passages: list[dict]
+    *,
+    title: str,
+    venue: str,
+    year: int | str | None,
+    arm: Arm,
+    crossref_summary: dict,
+    passages: list[dict],
 ) -> str:
+    """Build the user message that presents one paper to the model.
+
+    Args:
+        title: The paper's title.
+        venue: The journal or conference.
+        year: The publication year.
+        arm: The study arm. Not sent to the model.
+        crossref_summary: The metadata facts: `das_texts`, `dataset_ids` and
+            `confirmed_datasets`.
+        passages: The passages selected from the paper's text.
+
+    Returns:
+        The message text: the metadata, the passages and the instruction to
+        call the tool.
+    """
     meta_lines = [
         f"Title: {title}",
         f"Venue: {venue}   Year: {year}",
@@ -731,7 +871,21 @@ def _build_user_message(
     )
 
 
-def _judgement(raw: dict, vocab, fname: str) -> Judgement:
+def _judgement(raw: dict, vocab: type[_Tok], fname: str) -> Judgement:
+    """Build and validate one judgement from the model's raw output.
+
+    Args:
+        raw: The judgement object the model returned.
+        vocab: The vocabulary the value must belong to.
+        fname: The name of the field, used in error messages.
+
+    Returns:
+        The validated judgement.
+
+    Raises:
+        SchemaError: If `raw` is not an object. An invalid value, confidence
+            or rationale raises it from `Judgement.validate`.
+    """
     if not isinstance(raw, dict):
         raise SchemaError(f"{fname}: expected an object, got {type(raw).__name__}")
     return Judgement(
@@ -743,6 +897,21 @@ def _judgement(raw: dict, vocab, fname: str) -> Judgement:
 
 
 def _axis(raw: dict, label: str) -> AxisRecord:
+    """Build one axis record from the model's raw output.
+
+    `actual` is always set to NOT_ATTEMPTED here: only `verify.py` may say
+    what verification found. `SchemaError` propagates from any value that is
+    not a valid token.
+
+    Args:
+        raw: The axis object the model returned; None is read as empty.
+        label: The name of the axis (`"axis_a"` or `"axis_b"`), used in
+            error messages.
+
+    Returns:
+        The axis record. Its cross-field rules are checked later, by
+        `PaperRecord.validate`.
+    """
     raw = raw or {}
     return AxisRecord(
         case=_judgement(raw.get("case"), Case, f"{label}.case"),
@@ -809,12 +978,20 @@ UBIQUITOUS_SOFTWARE_DOIS = frozenset(
 
 
 def _own_dataset_ids(crossref_summary: dict) -> list:
-    """Dataset ids that could plausibly be this paper's own.
+    """List the dataset ids that could plausibly be this paper's own.
 
     `confirmed_datasets` is built from the reference list, so a cited deposit
     counts the same as a deposited one. That is usually harmless -- a paper
     citing a Dryad record often made it -- but not for the handful of software
     records that appear in thousands of reference lists.
+
+    Args:
+        crossref_summary: The metadata facts: `dataset_ids` and
+            `confirmed_datasets`. May be None.
+
+    Returns:
+        The publisher-asserted dataset ids, followed by the confirmed
+        datasets that are not in `UBIQUITOUS_SOFTWARE_DOIS`.
     """
     cs = crossref_summary or {}
     ids = list(cs.get("dataset_ids") or [])
@@ -827,7 +1004,7 @@ def _own_dataset_ids(crossref_summary: dict) -> list:
 
 
 def has_classifiable_evidence(*, crossref_summary: dict, passages: list) -> bool:
-    """Is there anything for the model to read beyond a title?
+    """Tell whether there is anything for the model to read beyond a title.
 
     A paper with no passages, no data-availability statement and no dataset link
     gives the model a title, a venue and a year. Asking it to code that paper is
@@ -835,6 +1012,15 @@ def has_classifiable_evidence(*, crossref_summary: dict, passages: list) -> bool
 
     A cited Qiskit or Cirq DOI is not such a link: see
     `UBIQUITOUS_SOFTWARE_DOIS`.
+
+    Args:
+        crossref_summary: The metadata facts: `das_texts`, `dataset_ids` and
+            `confirmed_datasets`. May be None.
+        passages: The passages selected from the paper's text.
+
+    Returns:
+        True if there is at least one passage, data-availability statement
+        or dataset link that could be the paper's own.
     """
     cs = crossref_summary or {}
     return bool(passages or cs.get("das_texts") or _own_dataset_ids(cs))
@@ -842,27 +1028,45 @@ def has_classifiable_evidence(*, crossref_summary: dict, passages: list) -> bool
 
 def unclassifiable_record(
     *,
-    openalex_id,
-    doi,
-    title,
-    venue,
-    year,
-    arm,
-    retrieval,
-    text_source,
-    text_url,
+    openalex_id: str,
+    doi: str,
+    title: str,
+    venue: str,
+    year: int | str | None,
+    arm: Arm,
+    retrieval: Retrieval,
+    text_source: TextSource,
+    text_url: str,
     reason: str = "no retrievable text, no data-availability statement and no dataset link",
 ) -> PaperRecord:
-    """The record for a paper the pipeline refuses to put in front of a model.
+    """Build the record for a paper the pipeline refuses to show a model.
 
     Every judgement is LOW confidence with no evidence, so nothing here can be
     mistaken for a coded result; `needs_human_review` routes it to a coder.
+
+    Args:
+        openalex_id: The paper's OpenAlex id.
+        doi: The paper's DOI.
+        title: The paper's title.
+        venue: The journal or conference.
+        year: The publication year; None or an empty string if unknown.
+        arm: The study arm.
+        retrieval: How much of the paper was retrieved.
+        text_source: Where the text was retrieved from.
+        text_url: The URL of the copy that was read.
+        reason: Why the paper cannot be classified; used as every rationale
+            and as the review reason.
+
+    Returns:
+        A validated record with `not_applicable` on both axes, LOW
+        confidence throughout, an empty `model_id` and `needs_human_review`
+        set.
     """
 
-    def j(vocab_value):
+    def j(vocab_value: _Tok) -> Judgement:
         return Judgement(vocab_value, Confidence.LOW, reason)
 
-    def axis():
+    def axis() -> AxisRecord:
         return AxisRecord(
             case=j(Case.NOT_APPLICABLE),
             data_type=j(DataType.UNCLEAR),
@@ -897,12 +1101,12 @@ def unclassifiable_record(
 
 
 def classify(
-    client,
+    client: anthropic.Anthropic,
     *,
     model: str,
     title: str,
     venue: str,
-    year,
+    year: int | str | None,
     arm: Arm,
     openalex_id: str,
     doi: str,
@@ -913,8 +1117,35 @@ def classify(
     text_url: str,
     max_attempts: int = 3,
 ) -> tuple[PaperRecord, Usage]:
-    """One paper -> one validated PaperRecord. Raises ClassificationError if the
-    model cannot produce a schema-valid record within max_attempts.
+    """Classify one paper into one validated record.
+
+    A reply with no tool call, or a record the validator rejects, is handed
+    back to the model with the complaint, up to `max_attempts` times.
+
+    Args:
+        client: The Anthropic client to call.
+        model: The model id.
+        title: The paper's title.
+        venue: The journal or conference.
+        year: The publication year.
+        arm: The study arm, stored in the record.
+        openalex_id: The paper's OpenAlex id.
+        doi: The paper's DOI.
+        crossref_summary: The metadata facts shown to the model: `das_texts`,
+            `dataset_ids` and `confirmed_datasets`.
+        passages: The passages selected from the paper's text.
+        retrieval: How much of the paper was retrieved.
+        text_source: Where the text was retrieved from.
+        text_url: The URL of the copy that was read.
+        max_attempts: The most model calls to make for this paper.
+
+    Returns:
+        A tuple `(record, usage)`: the validated record, and the tokens used
+        over every attempt.
+
+    Raises:
+        ClassificationError: If the output was truncated at `max_tokens`, or
+            if no schema-valid record was produced within `max_attempts`.
     """
     user_msg = _build_user_message(
         title=title,
@@ -1011,15 +1242,30 @@ _DEHYPHEN = re.compile(r"-\s*\n\s*")
 
 
 def _norm(t: str) -> str:
-    """Fold to lowercase alphanumerics separated by single spaces, so a quote
-    still matches across line-wrap hyphenation, smart quotes and runs of
-    whitespace introduced by PDF extraction.
+    """Fold text to lowercase alphanumerics separated by single spaces.
+
+    A quote then still matches across line-wrap hyphenation, smart quotes and
+    runs of whitespace introduced by PDF extraction.
+
+    Args:
+        t: The text to fold. None is read as empty.
+
+    Returns:
+        The folded text.
     """
     return _WS.sub(" ", _DEHYPHEN.sub("", fold_ligatures(t or "")).lower()).strip()
 
 
 def grounding_text(*, crossref_summary: dict, passages: list[dict]) -> str:
-    """Everything the model was actually shown that it may quote from."""
+    """Collect everything the model was actually shown that it may quote from.
+
+    Args:
+        crossref_summary: The metadata facts; its `das_texts` may be quoted.
+        passages: The passages shown to the model.
+
+    Returns:
+        The passages and statements joined and folded with `_norm`.
+    """
     parts = [p.get("text", "") for p in (passages or [])]
     parts += list((crossref_summary or {}).get("das_texts") or [])
     return _norm(" \n ".join(parts))
@@ -1032,6 +1278,11 @@ def locate_evidence(evidence: list, passages: list) -> None:
     came from. Deriving it here rather than trusting the model is the same rule
     that governs `Actual`: a fact about the document is established by looking,
     not by assertion. Leaves it empty when the parser had no structure.
+
+    Args:
+        evidence: The record's `Evidence` items; `locator` is set in place.
+        passages: The passages shown to the model, each with `text` and
+            optionally `section`.
     """
     for ev in evidence:
         q = _norm(ev.quote)
@@ -1046,13 +1297,21 @@ def locate_evidence(evidence: list, passages: list) -> None:
 
 
 def check_evidence_grounded(evidence: list, grounding: str) -> None:
-    """Every quote must appear in the supplied text.
+    """Check that every quote appears in the supplied text.
 
     `Evidence.quote` is documented as verbatim, but nothing enforced where it
     was verbatim *from*. A model handed only a title can quote the title back,
     satisfy the `confidence=high requires an evidence_id` rule, and land a
     confident code on a paper whose text was never retrieved — which is how v1
     produced unusable output.
+
+    Args:
+        evidence: The record's `Evidence` items.
+        grounding: The text the model was shown, folded (see
+            `grounding_text`).
+
+    Raises:
+        SchemaError: If a quote is not present in the supplied text.
     """
     for ev in evidence:
         q = _norm(ev.quote)
@@ -1069,21 +1328,51 @@ def check_evidence_grounded(evidence: list, grounding: str) -> None:
 def _assemble(
     data: dict,
     *,
-    openalex_id,
-    doi,
-    title,
-    venue,
-    year,
-    arm,
-    model,
-    retrieval,
-    text_source,
-    text_url,
+    openalex_id: str,
+    doi: str,
+    title: str,
+    venue: str,
+    year: int | str | None,
+    arm: Arm,
+    model: str,
+    retrieval: Retrieval,
+    text_source: TextSource,
+    text_url: str,
     usage: Usage,
     grounding: Optional[str] = None,
     passages: Optional[list] = None,
     crossref_das: bool = False,
 ) -> PaperRecord:
+    """Turn the model's raw tool input into a validated record.
+
+    This is the one gate every classification passes, whichever path it came
+    by: synchronous, batch or manual. `SchemaError` propagates from any value
+    outside the vocabulary, any broken cross-field rule and any quote that is
+    not in the supplied text.
+
+    Args:
+        data: The input of the `record_classification` tool call.
+        openalex_id: The paper's OpenAlex id.
+        doi: The paper's DOI.
+        title: The paper's title.
+        venue: The journal or conference.
+        year: The publication year; None or an empty string if unknown.
+        arm: The study arm.
+        model: The model id, or `manual:<coder>`, stored as `model_id`.
+        retrieval: How much of the paper was retrieved.
+        text_source: Where the text was retrieved from.
+        text_url: The URL of the copy that was read.
+        usage: The tokens used, stored in the record.
+        grounding: The folded text the quotes must appear in, or None to
+            skip the grounding check.
+        passages: The passages shown to the model, used to fill each quote's
+            locator.
+        crossref_das: Whether Crossref carries a data-availability statement
+            for the paper, which decides `das_source`.
+
+    Returns:
+        The validated record.
+    """
     evidence = [
         Evidence(
             id=int(e["id"]),
@@ -1137,8 +1426,19 @@ def _assemble(
 
 
 def should_escalate(rec: PaperRecord) -> bool:
-    """Tier-2 triggers. Escalation rate is itself worth reporting: a corpus that
-    escalates 40% of papers is telling you the fast model is the wrong tool.
+    """Decide whether a record should be re-run on the stronger model.
+
+    Escalation rate is itself worth reporting: a corpus that escalates 40% of
+    papers is telling you the fast model is the wrong tool.
+
+    Args:
+        rec: The record the fast model produced.
+
+    Returns:
+        True if the record is flagged for review, a case is not HIGH
+        confidence, a paper that declares public data is coded as something
+        else than the three public cases, or the paper type is LOW
+        confidence.
     """
     if rec.needs_human_review:
         return True

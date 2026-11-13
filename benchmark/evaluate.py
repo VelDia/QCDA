@@ -1,5 +1,7 @@
-"""Score every system against the human gold set: accuracy, agreement, paired
-significance, and the manual effort each one leaves behind.
+"""Score every system against the human gold set.
+
+Reports accuracy, agreement, paired significance, and the manual effort
+each system leaves behind.
 
     python evaluate.py \
         --system pipeline=runs/pipeline_claude-opus-5-5/analysis.csv \
@@ -72,12 +74,38 @@ AXES = ("a", "b")
 # ---------------------------------------------------------------------------
 # Loading
 # ---------------------------------------------------------------------------
-def _truthy(v) -> bool:
+def _truthy(v: object) -> bool:
+    """Read a CSV or JSON flag as a boolean.
+
+    Args:
+        v: The value to read; anything is accepted and converted with `str`.
+
+    Returns:
+        True for `1`, `true`, `yes` or `y` in any letter case, False otherwise.
+    """
     return str(v).strip().lower() in ("1", "true", "yes", "y")
 
 
 def load_system(name: str, path: Path, texts: Path) -> dict:
-    """{openalex_id: {a, b, a_conf, b_conf, flagged, model, tin, tout, ...}} plus meta."""
+    """Load one system's predictions and what is known about its run.
+
+    Args:
+        name: The name the system is reported under.
+        path: A baseline run (`.jsonl` from baseline.py) or a pipeline export
+            (`analysis.csv`, or any CSV with `openalex_id`, `a_case` and
+            `b_case`). For a pipeline export, `dap.sqlite`, `timing.json` and
+            `evidence.csv` beside it are read when they exist.
+        texts: The directory of cached full texts, used to re-check the
+            pipeline's quoted evidence independently.
+
+    Returns:
+        A dict with two keys. `preds` maps each `openalex_id` to its
+        prediction: `a` and `b` (a case token or `INVALID`), `a_conf`,
+        `b_conf`, `flagged` and `model`. `meta` holds `name`, `path`, `kind`
+        (`"baseline"` or `"pipeline"`), `seconds`, `grounded` (one bool per
+        checked quote), `retrieval` (a Counter of retrieval outcomes) and
+        `usage` (`(model, input_tokens, output_tokens)` per call).
+    """
     preds, meta = (
         {},
         {
@@ -175,7 +203,21 @@ def load_system(name: str, path: Path, texts: Path) -> dict:
 # Scoring
 # ---------------------------------------------------------------------------
 def scored(gold: list[dict], preds: dict) -> list[dict]:
-    """One row per gold paper: what was predicted, and whether it is right."""
+    """Score a system's predictions against the gold set.
+
+    Args:
+        gold: The gold rows: `openalex_id`, `gold_a`, `gold_b`, `stratum`
+            and the `nda` marker.
+        preds: The system's predictions by `openalex_id`, as in
+            `load_system(...)["preds"]`. A gold paper with no prediction is
+            scored as invalid on both axes, flagged and `missing`.
+
+    Returns:
+        One row per gold paper: `id`, `stratum`, `flagged`, `missing`, and per
+        axis `<ax>_gold`, `<ax>_pred`, `<ax>_ok` and `<ax>_eff` (the
+        prediction as scored, with the NDA equivalence applied); `both_ok`;
+        and `conf`, the rank used to order reviews (lowest first).
+    """
     out = []
     for g in gold:
         p = preds.get(g["openalex_id"]) or {
@@ -209,6 +251,18 @@ def scored(gold: list[dict], preds: dict) -> list[dict]:
 
 
 def agreement(rows: list[dict], ax: str) -> dict:
+    """Compute the agreement statistics of one axis.
+
+    Args:
+        rows: The scored rows of one system (see `scored`). Must not be empty.
+        ax: The axis, `"a"` or `"b"`.
+
+    Returns:
+        A dict with `kappa` (Cohen's), `pabak`, `macro_f1`, `weighted_f1`,
+        `invalid` (the number of invalid predictions), `per_class` (one row
+        of support, precision, recall and F1 per case token) and `confusion`
+        (a Counter over `(gold, predicted)` pairs).
+    """
     y = [r[f"{ax}_gold"] for r in rows]
     p = [r[f"{ax}_eff"] for r in rows]
     labels = LABELS + ([INVALID] if INVALID in p else [])
@@ -254,10 +308,25 @@ def agreement(rows: list[dict], ax: str) -> dict:
     }
 
 
-def weighted_accuracy(rows, key, population, *, boot=2000, seed=0):
-    """Accuracy reweighted from the stratified sample to the frame population,
-    with a stratified bootstrap interval. Strata absent from the sample get no
-    weight; the share of the population they hold is reported alongside.
+def weighted_accuracy(
+    rows: list[dict], key: str, population: dict[str, int], *, boot: int = 2000, seed: int = 0
+) -> tuple[float, float, float, float] | None:
+    """Reweight accuracy from the stratified sample to the frame population.
+
+    The interval is a stratified bootstrap. Strata absent from the sample get
+    no weight; the share of the population they hold is reported alongside.
+
+    Args:
+        rows: The scored rows of one system (see `scored`).
+        key: The row key that holds the 0/1 outcome, e.g. `"a_ok"`.
+        population: The number of frame papers in each stratum.
+        boot: The number of bootstrap resamples.
+        seed: The seed of the bootstrap's random generator.
+
+    Returns:
+        A tuple `(estimate, ci_low, ci_high, covered)`, where `covered` is the
+        share of the population in strata the sample represents; or None if
+        no sampled stratum is in `population`.
     """
     by = defaultdict(list)
     for r in rows:
@@ -282,6 +351,16 @@ def weighted_accuracy(rows, key, population, *, boot=2000, seed=0):
 
 
 def mcnemar_exact(b: int, c: int) -> float:
+    """Compute the exact two-sided McNemar test on discordant pairs.
+
+    Args:
+        b: The number of pairs only the first system got right.
+        c: The number of pairs only the second system got right.
+
+    Returns:
+        The two-sided binomial p-value, capped at 1.0. It is 1.0 when there
+        are no discordant pairs.
+    """
     n = b + c
     if n == 0:
         return 1.0
@@ -290,7 +369,24 @@ def mcnemar_exact(b: int, c: int) -> float:
     return min(1.0, 2 * p)
 
 
-def paired(ref: list[dict], sys_: list[dict], key: str, *, boot=10000, seed=0) -> dict:
+def paired(
+    ref: list[dict], sys_: list[dict], key: str, *, boot: int = 10000, seed: int = 0
+) -> dict:
+    """Compare a system with the reference on the same papers.
+
+    Args:
+        ref: The scored rows of the reference system.
+        sys_: The scored rows of the system compared, in the same paper order
+            as `ref`.
+        key: The row key that holds the 0/1 outcome, e.g. `"both_ok"`.
+        boot: The number of paired bootstrap resamples.
+        seed: The seed of the bootstrap's random generator.
+
+    Returns:
+        A dict with `diff` (system accuracy minus reference accuracy),
+        `diff_lo` and `diff_hi` (its 95% paired-bootstrap interval),
+        `ref_only` and `sys_only` (the discordant counts) and `p_mcnemar`.
+    """
     x = [int(r[key]) for r in ref]
     y = [int(s[key]) for s in sys_]
     b = sum(1 for i, j in zip(x, y) if i and not j)  # reference right, system wrong
@@ -315,6 +411,14 @@ def paired(ref: list[dict], sys_: list[dict], key: str, *, boot=10000, seed=0) -
 
 
 def holm(pvals: list[float]) -> list[float]:
+    """Apply Holm's step-down correction to a family of p-values.
+
+    Args:
+        pvals: The raw p-values of every comparison in the family.
+
+    Returns:
+        The adjusted p-values, in the order given, monotone and capped at 1.0.
+    """
     order = sorted(range(len(pvals)), key=lambda i: pvals[i])
     adj, run = [0.0] * len(pvals), 0.0
     for rank, i in enumerate(order):
@@ -324,10 +428,18 @@ def holm(pvals: list[float]) -> list[float]:
 
 
 def effort_curve(rows: list[dict]) -> list[float]:
-    """Expected paper errors left after reviewing k papers, k = 0..n, reviewing
-    the least confident first. Ties are broken in expectation, not by an
-    arbitrary order: reviewing j of a tie group of g with e errors removes
-    j*e/g of them.
+    """Compute the paper errors expected to remain after each review.
+
+    Papers are reviewed least confident first. Ties are broken in expectation,
+    not by an arbitrary order: reviewing j of a tie group of g with e errors
+    removes j*e/g of them.
+
+    Args:
+        rows: The scored rows of one system (see `scored`).
+
+    Returns:
+        The expected number of wrong papers left after reviewing k papers, for
+        k = 0..n; the list has n + 1 entries.
     """
     groups = defaultdict(lambda: [0, 0])
     for r in rows:
@@ -345,13 +457,29 @@ def effort_curve(rows: list[dict]) -> list[float]:
 
 
 # ---------------------------------------------------------------------------
-def fmt(v, pct=False, nd=3):
+def fmt(v: object, pct: bool = False, nd: int = 3) -> str:
+    """Format a value for the Markdown report.
+
+    Args:
+        v: The value. None and NaN are shown as an em dash.
+        pct: Whether to show the value as a percentage with one decimal.
+        nd: The number of decimals of a float that is not a percentage.
+
+    Returns:
+        The formatted text.
+    """
     if v is None or (isinstance(v, float) and math.isnan(v)):
         return "—"
     return f"{100 * v:.1f}%" if pct else (f"{v:.{nd}f}" if isinstance(v, float) else str(v))
 
 
 def main() -> None:
+    """Score every `--system` against the gold set and write the result tables.
+
+    Reads the command line (see the module docstring), writes `metrics.csv`,
+    `per_class.csv`, `effort.csv`, `paired.csv`, one `predictions_<name>.csv`
+    per system and `report.md` to `--out`, and prints the report.
+    """
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--gold", default=str(HERE / "gold" / "frame_review.csv"))
     ap.add_argument("--population", default=str(HERE / "gold" / "strata_population.csv"))
@@ -504,7 +632,23 @@ def main() -> None:
     print((out / "report.md").read_text())
 
 
-def report(a, n, metrics, effort, paired_rows) -> str:
+def report(
+    a: argparse.Namespace, n: int, metrics: list[dict], effort: list[dict], paired_rows: list[dict]
+) -> str:
+    """Render the result tables as a Markdown report.
+
+    Args:
+        a: The parsed command line; `gold`, `reference` and
+            `minutes_per_check` are quoted in the text.
+        n: The number of gold papers.
+        metrics: One row per system and axis, as written to `metrics.csv`.
+        effort: One row per system, as written to `effort.csv`.
+        paired_rows: One row per paired comparison, as written to
+            `paired.csv`; empty when there is no reference system.
+
+    Returns:
+        The report as Markdown text.
+    """
     L = [
         "# Benchmark results\n",
         f"Gold: `{a.gold}`, {n} papers, two axes each. A missing or invalid "

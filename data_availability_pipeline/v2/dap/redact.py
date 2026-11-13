@@ -25,6 +25,15 @@ _MAILTO = re.compile(r"(?i)\bmailto:[^\s'\"<>();]+")
 
 
 def redact(text: object) -> str:
-    """`text` as a string, with credential values replaced by MASK."""
+    """Replace credential values in a piece of text with `MASK`.
+
+    Args:
+        text: The text to clean, typically an error message or a URL. Any
+            object is accepted and converted with `str`.
+
+    Returns:
+        The text with the value of every credential-like query parameter and
+        every `mailto:` address replaced by `MASK`.
+    """
     s = _PARAM.sub(lambda m: f"{m.group(1)}={MASK}", str(text))
     return _MAILTO.sub(f"mailto:{MASK}", s)

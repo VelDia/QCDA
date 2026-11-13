@@ -6,8 +6,10 @@ import argparse
 import csv
 import json
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
+from typing import NoReturn
 
 import pytest
 
@@ -17,17 +19,18 @@ import dap.classify as C
 import dap.pipeline as P
 from dap.collect import Http, Query, collect
 from dap.schema import Arm
+from dap.sources import Config
 
 
 # --------------------------------------------------------------------------- subject
-def test_subject_goes_into_a_title_and_abstract_filter_by_default():
+def test_subject_goes_into_a_title_and_abstract_filter_by_default() -> None:
     q = Query(subject="protein folding", year_min=2021, year_max=2026)
     p = q.params()
     assert "search" not in p
     assert p["filter"] == ("title_and_abstract.search:protein folding,publication_year:2021-2026")
 
 
-def test_title_and_fulltext_modes_and_extra_filter():
+def test_title_and_fulltext_modes_and_extra_filter() -> None:
     assert (
         Query(subject="graphene", search_in="title").params()["filter"] == "title.search:graphene"
     )
@@ -36,7 +39,7 @@ def test_title_and_fulltext_modes_and_extra_filter():
     assert Query(subject="x", year_min=2020).params()["filter"].endswith("publication_year:>2019")
 
 
-def test_subject_is_required_and_a_comma_cannot_split_the_filter():
+def test_subject_is_required_and_a_comma_cannot_split_the_filter() -> None:
     with pytest.raises(ValueError):
         Query(subject="  ")
     with pytest.raises(ValueError):
@@ -44,7 +47,15 @@ def test_subject_is_required_and_a_comma_cannot_split_the_filter():
     Query(subject="ice, snow", search_in="fulltext")  # plain search allows it
 
 
-def _work(i):
+def _work(i: int) -> dict:
+    """Build one OpenAlex work.
+
+    Args:
+        i: The number of the work; its id is `W<i>`.
+
+    Returns:
+        The work object, as the OpenAlex API returns it.
+    """
     return {
         "id": f"https://openalex.org/W{i}",
         "doi": f"https://doi.org/10.1/{i}",
@@ -60,10 +71,27 @@ def _work(i):
 class _Pages:
     """Fake OpenAlex: serves pages by cursor; optionally runs out of quota once."""
 
-    def __init__(self, pages, quota_at=None):
+    def __init__(self, pages: list[list[dict]], quota_at: str | None = None) -> None:
+        """Script the pages.
+
+        Args:
+            pages: The works of each page, in cursor order.
+            quota_at: The cursor at which to answer 429 once, or None.
+        """
         self.pages, self.quota_at, self.calls = pages, quota_at, []
 
-    def __call__(self, url, params, timeout):
+    def __call__(self, url: str, params: dict, timeout: float) -> SimpleNamespace:
+        """Serve one page, as `requests.get` would.
+
+        Args:
+            url: The request URL; ignored.
+            params: The request parameters; `cursor` selects the page.
+            timeout: The request timeout; ignored.
+
+        Returns:
+            A response-like object with `status_code`, `headers`,
+            `raise_for_status` and `json`.
+        """
         self.calls.append(dict(params))
         cur = params["cursor"]
         if self.quota_at == cur:
@@ -83,7 +111,7 @@ class _Pages:
         )
 
 
-def test_collect_pages_dedups_and_records_the_query(tmp_path):
+def test_collect_pages_dedups_and_records_the_query(tmp_path: Path) -> None:
     get = _Pages([[_work(1), _work(2)], [_work(2), _work(3)]])
     out = tmp_path / "papers.csv"
     n = collect(
@@ -98,7 +126,7 @@ def test_collect_pages_dedups_and_records_the_query(tmp_path):
     assert not (tmp_path / "papers.csv.cursor.json").exists(), "finished: no cursor left"
 
 
-def test_collect_resumes_exactly_after_quota_exhaustion(tmp_path):
+def test_collect_resumes_exactly_after_quota_exhaustion(tmp_path: Path) -> None:
     get = _Pages([[_work(1)], [_work(2)], [_work(3)]], quota_at="1")
     out, http = tmp_path / "p.csv", Http(get=get, sleep=lambda s: None)
     assert collect(Query(subject="x"), out, http, log=lambda m: None) == 1
@@ -107,7 +135,7 @@ def test_collect_resumes_exactly_after_quota_exhaustion(tmp_path):
     assert [c["cursor"] for c in get.calls] == ["*", "1", "1", "2"]
 
 
-def test_collect_refuses_to_mix_queries_in_one_file(tmp_path):
+def test_collect_refuses_to_mix_queries_in_one_file(tmp_path: Path) -> None:
     get = _Pages([[_work(1)], [_work(2)]], quota_at="1")
     out, http = tmp_path / "p.csv", Http(get=get, sleep=lambda s: None)
     collect(Query(subject="x"), out, http, log=lambda m: None)
@@ -115,7 +143,7 @@ def test_collect_refuses_to_mix_queries_in_one_file(tmp_path):
         collect(Query(subject="y"), out, http, log=lambda m: None)
 
 
-def test_collect_output_enrols_without_any_arm_map(tmp_path):
+def test_collect_output_enrols_without_any_arm_map(tmp_path: Path) -> None:
     get = _Pages([[_work(1), _work(2)]])
     out = tmp_path / "papers.csv"
     collect(Query(subject="x"), out, Http(get=get, sleep=lambda s: None), log=lambda m: None)
@@ -129,7 +157,7 @@ def test_collect_output_enrols_without_any_arm_map(tmp_path):
     assert arms == {Arm.UNSPECIFIED.value}
 
 
-def test_cli_has_no_arm_flags_and_offers_collect():
+def test_cli_has_no_arm_flags_and_offers_collect() -> None:
     import subprocess
 
     root = Path(__file__).resolve().parents[1]
@@ -157,7 +185,7 @@ def test_cli_has_no_arm_flags_and_offers_collect():
 
 
 # --------------------------------------------------------------------------- prompt
-def test_prompt_is_subject_neutral_and_carries_no_arm():
+def test_prompt_is_subject_neutral_and_carries_no_arm() -> None:
     assert "quantum computing, machine learning" not in C.SYSTEM_PROMPT
     msg = C._build_user_message(
         title="t", venue="v", year=2024, arm=Arm.QUANTUM_COMPUTING, crossref_summary={}, passages=[]
@@ -166,7 +194,7 @@ def test_prompt_is_subject_neutral_and_carries_no_arm():
 
 
 # --------------------------------------------------------------------------- text cache
-def test_text_cache_is_off_unless_asked(tmp_path, monkeypatch):
+def test_text_cache_is_off_unless_asked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     ft = SimpleNamespace(
         text="full text", source=SimpleNamespace(value="pdf"), url="http://x", complete=True
     )
@@ -180,7 +208,7 @@ def test_text_cache_is_off_unless_asked(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- current models
-def test_forced_tool_choice_only_where_the_model_accepts_it():
+def test_forced_tool_choice_only_where_the_model_accepts_it() -> None:
     assert C.tool_choice_for("claude-haiku-4-5-20251001") == {
         "type": "tool",
         "name": "record_classification",
@@ -201,7 +229,7 @@ def test_forced_tool_choice_only_where_the_model_accepts_it():
         assert req["tool_choice"] == {"type": "auto"} and "temperature" not in req
 
 
-def test_current_models_are_priced_so_the_budget_can_stop_them():
+def test_current_models_are_priced_so_the_budget_can_stop_them() -> None:
     assert C.Usage(input_tokens=1_000_000, output_tokens=0, model="claude-opus-5-5").cost_usd == 4.0
 
 
@@ -211,10 +239,19 @@ def test_current_models_are_priced_so_the_budget_can_stop_them():
 ADDR = "someone.private@example.org"
 
 
-def _recorder(calls, reply=None):
+def _recorder(calls: list, reply: SimpleNamespace | None = None) -> Callable[..., SimpleNamespace]:
+    """Build a stand-in for `sources._get` that records every request.
+
+    Args:
+        calls: The list each `(url, params)` pair is appended to.
+        reply: The response to return; None raises `PermanentError`.
+
+    Returns:
+        A function with the signature of `sources._get`.
+    """
     import dap.sources as S
 
-    def fake(cfg, url, **kw):
+    def fake(cfg: Config, url: str, **kw: object) -> SimpleNamespace:
         calls.append((url, kw.get("params") or {}))
         if reply is None:
             raise S.PermanentError("HTTP 404")
@@ -223,7 +260,7 @@ def _recorder(calls, reply=None):
     return fake
 
 
-def test_redact_masks_addresses_and_keys_but_keeps_the_url_readable():
+def test_redact_masks_addresses_and_keys_but_keeps_the_url_readable() -> None:
     from dap.redact import redact
 
     msg = (
@@ -236,7 +273,7 @@ def test_redact_masks_addresses_and_keys_but_keeps_the_url_readable():
     assert "api.unpaywall.org" in out and "/v2/10.1/x?email=<redacted>" in out
 
 
-def test_no_user_agent_carries_the_address():
+def test_no_user_agent_carries_the_address() -> None:
     import dap.sources as S
     import dap.verify as V
 
@@ -244,12 +281,12 @@ def test_no_user_agent_carries_the_address():
     assert "@" not in V._UA and "{" not in V._UA
 
 
-def test_a_failed_request_error_does_not_carry_the_address(monkeypatch):
+def test_a_failed_request_error_does_not_carry_the_address(monkeypatch: pytest.MonkeyPatch) -> None:
     import requests
 
     import dap.sources as S
 
-    def boom(url, params=None, **kw):
+    def boom(url: str, params: dict | None = None, **kw: object) -> NoReturn:
         raise requests.ConnectionError(
             f"Max retries exceeded with url: {url}?email={ADDR.replace('@', '%40')}"
         )
@@ -266,7 +303,7 @@ def test_a_failed_request_error_does_not_carry_the_address(monkeypatch):
     assert "someone.private" not in str(e.value)
 
 
-def test_only_crossref_gets_the_address_at_metadata(monkeypatch):
+def test_only_crossref_gets_the_address_at_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
     import dap.sources as S
 
     calls = []
@@ -282,7 +319,7 @@ def test_only_crossref_gets_the_address_at_metadata(monkeypatch):
     assert calls[0][1] == {}
 
 
-def test_without_an_address_unpaywall_is_skipped_and_noted(monkeypatch):
+def test_without_an_address_unpaywall_is_skipped_and_noted(monkeypatch: pytest.MonkeyPatch) -> None:
     import dap.sources as S
 
     calls = []
@@ -297,7 +334,7 @@ def test_without_an_address_unpaywall_is_skipped_and_noted(monkeypatch):
     )
 
 
-def test_the_store_never_writes_an_address_into_failures(tmp_path):
+def test_the_store_never_writes_an_address_into_failures(tmp_path: Path) -> None:
     from dap.store import Store
 
     s = Store(tmp_path / "s.sqlite")
@@ -310,10 +347,10 @@ def test_the_store_never_writes_an_address_into_failures(tmp_path):
     assert ADDR not in msg and "email=<redacted>" in msg
 
 
-def test_collect_sends_no_address():
+def test_collect_sends_no_address() -> None:
     seen = {}
 
-    def get(url, params=None, **kw):
+    def get(url: str, params: dict | None = None, **kw: object) -> SimpleNamespace:
         seen.update(params)
         return SimpleNamespace(
             status_code=200,

@@ -17,7 +17,7 @@ from common import INVALID, baseline_system, grounded, parse_answer  # noqa: E40
 
 
 # --------------------------------------------------------------------------- parsing
-def test_answer_is_found_inside_prose_and_fences():
+def test_answer_is_found_inside_prose_and_fences() -> None:
     reply = (
         'Here is my answer:\n```json\n{"axis_a": {"case": "not_applicable", '
         '"confidence": "high", "evidence": ""}, "axis_b": {"case": "on_request", '
@@ -33,7 +33,7 @@ def test_answer_is_found_inside_prose_and_fences():
     }
 
 
-def test_a_near_miss_token_is_invalid_not_repaired():
+def test_a_near_miss_token_is_invalid_not_repaired() -> None:
     ans, err = parse_answer(
         '{"axis_a": {"case": "Openly accessible"}, "axis_b": {"case": "upon_request"}}'
     )
@@ -41,19 +41,19 @@ def test_a_near_miss_token_is_invalid_not_repaired():
     assert "not a case token" in err
 
 
-def test_no_json_at_all_is_invalid_on_both_axes():
+def test_no_json_at_all_is_invalid_on_both_axes() -> None:
     ans, err = parse_answer("I cannot determine this.")
     assert ans["axis_a"]["case"] == ans["axis_b"]["case"] == INVALID and err
 
 
-def test_quote_grounding_folds_layout_but_catches_inventions():
+def test_quote_grounding_folds_layout_but_catches_inventions() -> None:
     text = "The data are available at https://zenodo.org/record/1 upon request."
     assert grounded("data are available at", text) is True
     assert grounded("deposited in Dryad", text) is False
     assert grounded("", text) is None
 
 
-def test_both_variants_ask_for_the_same_answer_format():
+def test_both_variants_ask_for_the_same_answer_format() -> None:
     for v in ("definitions", "pipeline_prompt"):
         s = baseline_system(v)
         assert '"axis_a": {"case": "<token>"' in s
@@ -62,7 +62,19 @@ def test_both_variants_ask_for_the_same_answer_format():
 
 
 # --------------------------------------------------------------------------- scoring
-def _gold(i, a, b, stratum="not_applicable", nda=0):
+def _gold(i: int, a: str, b: str, stratum: str = "not_applicable", nda: int = 0) -> dict:
+    """Build one gold row.
+
+    Args:
+        i: The number of the paper; its id is `W<i>`.
+        a: The gold case of Axis A.
+        b: The gold case of Axis B.
+        stratum: The sampling stratum.
+        nda: 1 if the paper is an NDA row, else 0.
+
+    Returns:
+        The row, as `gold/frame_review.csv` holds it.
+    """
     return {
         "openalex_id": f"https://openalex.org/W{i}",
         "gold_a": a,
@@ -72,12 +84,12 @@ def _gold(i, a, b, stratum="not_applicable", nda=0):
     }
 
 
-def test_missing_answer_counts_as_wrong_and_flagged():
+def test_missing_answer_counts_as_wrong_and_flagged() -> None:
     rows = E.scored([_gold(1, "not_applicable", "on_request")], {})
     assert rows[0]["missing"] and rows[0]["flagged"] and not rows[0]["both_ok"]
 
 
-def test_nda_rows_treat_on_request_and_restricted_as_one():
+def test_nda_rows_treat_on_request_and_restricted_as_one() -> None:
     g = [
         _gold(1, "explicitly_restricted", "on_request", nda=1),
         _gold(2, "explicitly_restricted", "on_request", nda=0),
@@ -96,18 +108,18 @@ def test_nda_rows_treat_on_request_and_restricted_as_one():
     assert r[0]["both_ok"] and not r[1]["a_ok"] and not r[1]["b_ok"]
 
 
-def test_mcnemar_exact_matches_the_binomial():
+def test_mcnemar_exact_matches_the_binomial() -> None:
     assert E.mcnemar_exact(0, 0) == 1.0
     # b=1, c=9: two-sided exact p = 2 * (C(10,0)+C(10,1)) / 2^10 = 22/1024
     assert abs(E.mcnemar_exact(1, 9) - 22 / 1024) < 1e-12
 
 
-def test_holm_is_monotone_and_capped():
+def test_holm_is_monotone_and_capped() -> None:
     assert E.holm([0.01, 0.04, 0.03]) == [0.03, 0.06, 0.06]
     assert max(E.holm([0.9, 0.8])) == 1.0
 
 
-def test_effort_curve_breaks_ties_in_expectation():
+def test_effort_curve_breaks_ties_in_expectation() -> None:
     rows = [
         {"conf": 0, "both_ok": False},
         {"conf": 0, "both_ok": True},
@@ -118,7 +130,7 @@ def test_effort_curve_breaks_ties_in_expectation():
 
 
 # --------------------------------------------------------------------------- end to end
-def test_baseline_and_evaluate_end_to_end(tmp_path):
+def test_baseline_and_evaluate_end_to_end(tmp_path: Path) -> None:
     texts = tmp_path / "texts"
     texts.mkdir()
     gold = [_gold(i, "not_applicable", "on_request") for i in range(1, 5)]
@@ -145,7 +157,7 @@ def test_baseline_and_evaluate_end_to_end(tmp_path):
         ]
     )
 
-    def fake(system, user):
+    def fake(system: str, user: str) -> tuple[str, int, int, str]:
         assert "FULL TEXT OF THE PAPER" in user and "on request" in user
         return next(replies), 1000, 50, "end_turn"
 

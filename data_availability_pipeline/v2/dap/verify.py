@@ -102,15 +102,41 @@ _SOFT_403_HOSTS = frozenset({"gitlab.com", "www.gitlab.com"})
 
 
 def _soft_404(host: str) -> bool:
+    """Tell whether a host answers 404 to automated requests indiscriminately.
+
+    Args:
+        host: The lower-cased hostname.
+
+    Returns:
+        True if the host is in `_SOFT_404_HOSTS`.
+    """
     return host in _SOFT_404_HOSTS
 
 
 def _soft_403(host: str) -> bool:
+    """Tell whether a host's 403 is an intermittent block, not a credential wall.
+
+    Args:
+        host: The lower-cased hostname.
+
+    Returns:
+        True if the host is in `_SOFT_403_HOSTS`.
+    """
     return host in _SOFT_403_HOSTS
 
 
 @dataclass
 class VerificationResult:
+    """The outcome of checking one identifier.
+
+    Attributes:
+        identifier: The identifier as the paper wrote it, verbatim.
+        status: What the check found.
+        http_status: The final HTTP status, or None if no response arrived.
+        final_url: The URL the request ended at, after redirects or a repair.
+        note: A short explanation of the status, for the audit trail.
+    """
+
     identifier: str
     status: Actual
     http_status: Optional[int] = None
@@ -119,6 +145,16 @@ class VerificationResult:
 
 
 def _pinning_of(identifier: str) -> Pinned:
+    """Classify how precisely one identifier pins what it points to.
+
+    Args:
+        identifier: A DOI or URL, as the paper wrote it.
+
+    Returns:
+        COMMIT_PINNED for a GitHub commit, tree or release tag,
+        DOI_VERSIONED for a DOI or a Zenodo record, UNPINNED_URL for any
+        other URL, and NONE for anything else.
+    """
     s = identifier.lower()
     if re.search(r"github\.com/.+/(commit|tree|releases/tag)/[0-9a-z._-]+", s):
         return Pinned.COMMIT_PINNED
@@ -132,7 +168,15 @@ def _pinning_of(identifier: str) -> Pinned:
 
 
 def classify_pinning(identifiers: Iterable[str]) -> Pinned:
-    """Most specific pinning across all identifiers for an axis."""
+    """Find the most specific pinning across all identifiers of an axis.
+
+    Args:
+        identifiers: The axis's identifiers, as the paper wrote them.
+
+    Returns:
+        The most specific `Pinned` value any identifier reaches; NONE if
+        there are no identifiers.
+    """
     best = Pinned.NONE
     order = {
         Pinned.NONE: 0,
@@ -154,8 +198,7 @@ _BARE_HOST = re.compile(r"^[a-z0-9][a-z0-9.\-]*\.[a-z]{2,}(?:[/:?#]|$)", re.I)
 
 
 def _normalise(identifier: str) -> str:
-    """Turn what a paper wrote into something fetchable, or "" if it is not a
-    locator at all.
+    """Turn what a paper wrote into something fetchable.
 
     A scheme-less URL is not an unverifiable identifier — it is the *normal* way
     papers cite a repository. Treating it as unresolvable meant a paper coded
@@ -168,6 +211,13 @@ def _normalise(identifier: str) -> str:
     Refusing it returned "" here, which made it NOT_APPLICABLE -- the same
     silent pass, one level down. A space before the first slash still refuses,
     so "github.com: code in the repository/src" does not become a URL.
+
+    Args:
+        identifier: A DOI, URL or bare host path, as the paper wrote it.
+
+    Returns:
+        An absolute `http(s)` URL, or an empty string if the identifier is
+        not a locator at all.
     """
     s = identifier.strip().rstrip(".,;)")
     if not s:
@@ -192,8 +242,7 @@ _MAX_REPAIR_GAPS = 3
 
 
 def _space_repairs(url: str) -> list[tuple[str, tuple[str, ...]]]:
-    """Candidate repairs of a URL whose path lost characters to spaces, as
-    (candidate_url, fills), all-underscore first.
+    """List candidate repairs of a URL whose path lost characters to spaces.
 
     Measured in the batch 210 export: PDF text extraction rendered
     `DWAVE4TSP_ClusteringMultitasking` as `DWAVE4TSP Clustering Multitasking`.
@@ -207,6 +256,14 @@ def _space_repairs(url: str) -> list[tuple[str, tuple[str, ...]]]:
 
     A run of spaces is one gap. Only the path is touched, never the host, the
     query or the fragment. Above `_MAX_REPAIR_GAPS` gaps nothing is generated.
+
+    Args:
+        url: The URL to repair; its path may contain spaces.
+
+    Returns:
+        A list of `(candidate_url, fills)` pairs, all-underscore first, where
+        `fills` holds the string put into each gap (`"_"` or `""`). Empty if
+        the path has no gap or more than `_MAX_REPAIR_GAPS` of them.
     """
     parts = urlsplit(url)
     pieces = re.split(r" +", parts.path)
@@ -223,8 +280,10 @@ def _space_repairs(url: str) -> list[tuple[str, tuple[str, ...]]]:
 def _repair(
     cfg: Config, identifier: str, url: str, original: VerificationResult
 ) -> VerificationResult:
-    """After a hard 404 on a path with spaces, try each `_space_repairs`
-    candidate and use one only if it is the only one that exists.
+    """Try to repair a path with spaces after a hard 404.
+
+    Each `_space_repairs` candidate is tried, and one is used only if it is
+    the only one that exists.
 
     Three outcomes, and the middle one is the reason this function exists
     rather than a substitution rule: BOHRTECHNOLOGY has two repositories whose
@@ -243,6 +302,17 @@ def _repair(
     Only on NOT_FOUND: a 403, a paywall or an error means the path is probably
     right. Never on a soft-404 host, where a 404 is not evidence (and becomes
     ERROR before it reaches here).
+
+    Args:
+        cfg: The run configuration.
+        identifier: The identifier as the paper wrote it.
+        url: The normalised URL that was checked.
+        original: The result of checking `url`.
+
+    Returns:
+        The repaired candidate's result if exactly one candidate exists;
+        otherwise `original`, with a note when the repair was ambiguous or
+        could not be established.
     """
     if original.status is not Actual.NOT_FOUND:
         return original
@@ -287,6 +357,16 @@ def _repair(
 
 
 def verify_identifier(cfg: Config, identifier: str) -> VerificationResult:
+    """Check whether one identifier from a paper actually delivers.
+
+    Args:
+        cfg: The run configuration: the timeout and any per-host TDM headers.
+        identifier: A DOI, URL or bare host path, as the paper wrote it.
+
+    Returns:
+        The result of the check. The status is NOT_APPLICABLE if the
+        identifier is not a resolvable locator.
+    """
     url = _normalise(identifier)
     if not url:
         return VerificationResult(
@@ -296,7 +376,18 @@ def verify_identifier(cfg: Config, identifier: str) -> VerificationResult:
 
 
 def _check(cfg: Config, identifier: str, url: str) -> VerificationResult:
-    """One fetch of `url`, reported against the paper's `identifier`."""
+    """Fetch one URL once and report it against the paper's identifier.
+
+    Args:
+        cfg: The run configuration.
+        identifier: The identifier as the paper wrote it, recorded in the
+            result.
+        url: The URL to fetch.
+
+    Returns:
+        The result of the fetch. A request that fails to complete gives
+        ERROR, never an exception.
+    """
     headers = {"User-Agent": _UA, "Accept": "text/html,application/xhtml+xml,*/*"}
     host = (urlparse(url).hostname or "").lower()
     if host in cfg.tdm_headers:
@@ -374,7 +465,17 @@ def _check(cfg: Config, identifier: str, url: str) -> VerificationResult:
 
 
 def aggregate(results: list[VerificationResult]) -> Actual:
-    """Worst-case wins: one broken link in a set makes the claim unreliable."""
+    """Reduce the results of an axis to one status; the worst case wins.
+
+    One broken link in a set makes the claim unreliable.
+
+    Args:
+        results: The results of every identifier checked for the axis.
+
+    Returns:
+        The most severe status among the results, NOT_APPLICABLE if none was
+        a resolvable identifier, and NOT_ATTEMPTED if there are no results.
+    """
     if not results:
         return Actual.NOT_ATTEMPTED
     severity = [
@@ -401,7 +502,7 @@ def derive_case(declared_case: Case, actual: Actual) -> tuple[Case, str]:
 
     `access_unresolvable` means a specific path was promised and did not hold.
     That is a fact about the world, established here, not a judgement the
-    classifier may make from the text. Returns (case, note).
+    classifier may make from the text.
 
     `Actual.ERROR` is deliberately NOT a promotion. A connect timeout, a DNS
     failure or a 503 says the check did not complete, not that the path is
@@ -411,6 +512,14 @@ def derive_case(declared_case: Case, actual: Actual) -> tuple[Case, str]:
     broken-link rate in one direction. 19 verification rows in the three
     databases carry `error`; 8 of them have no HTTP status at all. The outcome
     is still recorded in `actual`, which is what the separate token is for.
+
+    Args:
+        declared_case: The case the classifier assigned from the text.
+        actual: The aggregated verification status of the axis.
+
+    Returns:
+        A tuple `(case, note)`: the case after verification, and a note that
+        explains a promotion (empty when the case is unchanged).
     """
     broken = (Actual.NOT_FOUND, Actual.RESOLVES_NO_DATA)
     if declared_case is Case.OPENLY_ACCESSIBLE and actual in broken:

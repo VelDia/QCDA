@@ -65,14 +65,31 @@ db = sqlite3.connect(DB)
 db.row_factory = sqlite3.Row
 
 
-def db_meta(oid):
+def db_meta(oid: str) -> dict:
+    """Read a paper's stored metadata from the database.
+
+    Args:
+        oid: The paper's OpenAlex id.
+
+    Returns:
+        The stored metadata, or an empty dict if the paper is not in this
+        database.
+    """
     r = db.execute("select meta_json from papers where openalex_id=?", (oid,)).fetchone()
     return json.loads(r["meta_json"] or "{}") if r else {}
 
 
-def header_stripped(cid):
-    """Fallback when the row is not in this database: drop the metadata header,
-    which is the part the store will not let a quote come from.
+def header_stripped(cid: str) -> str:
+    """Build the grounding text from a prompt, without its metadata header.
+
+    The fallback when the row is not in this database: the header is the part
+    the store will not let a quote come from.
+
+    Args:
+        cid: The `custom_id` of the prompt.
+
+    Returns:
+        The prompt from "PASSAGES FROM THE PAPER" on, folded for matching.
     """
     t = prompts[cid]
     i = t.find("PASSAGES FROM THE PAPER")
@@ -108,8 +125,16 @@ DAS_BODY = re.compile(
 DAS_DISCLAIMER = re.compile(r"availability statements?,?\s*or supplementary materials", re.I)
 
 
-def das_in_text(dm):
-    """True when this row's own retrieved text carries a statement."""
+def das_in_text(dm: dict) -> str | None:
+    """Find a data-availability statement in a row's own retrieved text.
+
+    Args:
+        dm: The paper's stored metadata: `passages` and `das_texts`.
+
+    Returns:
+        The statement-shaped heading that is followed by statement language,
+        or None if there is none.
+    """
     blob = " ".join(
         (p.get("text", "") if isinstance(p, dict) else str(p)) for p in (dm.get("passages") or [])
     )

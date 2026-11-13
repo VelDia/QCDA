@@ -14,7 +14,12 @@ like and tidy fixtures prove nothing.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from dap.sources import Config
 
 # ---------------------------------------------------------------------------
 # Crossref
@@ -119,10 +124,18 @@ DATACITE_DATASET = {"data": {"attributes": DATACITE_DATASET_ATTRS}}
 DATACITE_ARTICLE = {"data": {"attributes": DATACITE_ARTICLE_ATTRS}}
 
 
-def datacite_bulk(*pairs):
-    """The *bulk* endpoint's shape: `data` is a list and each item carries its
-    own `id`. The single-DOI endpoint returns a bare object instead, which is
-    why a single-shaped fixture cannot stand in for a bulk one.
+def datacite_bulk(*pairs: tuple[str, dict]) -> dict:
+    """Build a response of DataCite's *bulk* endpoint.
+
+    In that shape `data` is a list and each item carries its own `id`. The
+    single-DOI endpoint returns a bare object instead, which is why a
+    single-shaped fixture cannot stand in for a bulk one.
+
+    Args:
+        *pairs: `(doi, attributes)` pairs, one per record in the response.
+
+    Returns:
+        The response body.
     """
     return {"data": [{"id": doi, "type": "dois", "attributes": attrs} for doi, attrs in pairs]}
 
@@ -172,16 +185,36 @@ DATACITE_PAPER = {
 
 
 class FakeResponse:
+    """A stand-in for `requests.Response`.
+
+    Attributes:
+        status_code: The HTTP status.
+        headers: The response headers.
+        text: The body as text.
+        content: The body as bytes.
+        url: The final URL, after redirects.
+    """
+
     def __init__(
         self,
-        payload=None,
+        payload: dict | None = None,
         *,
-        status=200,
-        headers=None,
-        text="",
-        content=b"",
-        url="https://final.example/x",
-    ):
+        status: int = 200,
+        headers: dict | None = None,
+        text: str = "",
+        content: bytes = b"",
+        url: str = "https://final.example/x",
+    ) -> None:
+        """Script one response.
+
+        Args:
+            payload: What `json()` returns; None makes `json()` raise.
+            status: The HTTP status.
+            headers: The response headers; JSON content type by default.
+            text: The body as text.
+            content: The body as bytes.
+            url: The final URL, after redirects.
+        """
         self._payload = payload
         self.status_code = status
         self.headers = headers or {"Content-Type": "application/json"}
@@ -189,18 +222,33 @@ class FakeResponse:
         self.content = content
         self.url = url
 
-    def json(self):
+    def json(self) -> dict:
+        """Return the scripted JSON payload.
+
+        Returns:
+            The payload given on construction.
+
+        Raises:
+            ValueError: If no payload was given.
+        """
         if self._payload is None:
             raise ValueError("no json")
         return self._payload
 
 
-def fake_get_factory(routes: dict):
-    """Build a stand-in for sources._get. `routes` maps a substring of the URL
-    to a FakeResponse or an Exception to raise.
+def fake_get_factory(routes: dict) -> Callable[..., FakeResponse]:
+    """Build a stand-in for `sources._get`.
+
+    Args:
+        routes: Maps a substring of the URL to the `FakeResponse` to return,
+            or to an exception to raise.
+
+    Returns:
+        A function with the signature of `sources._get`. It raises
+        AssertionError for a URL that no route matches.
     """
 
-    def _fake_get(cfg, url, **kw):
+    def _fake_get(cfg: Config, url: str, **kw: object) -> FakeResponse:
         for needle, resp in routes.items():
             if needle in url:
                 if isinstance(resp, Exception):
@@ -215,7 +263,22 @@ def fake_get_factory(routes: dict):
 # Anthropic client
 # ---------------------------------------------------------------------------
 class FakeBlock:
-    def __init__(self, payload, block_id="tu_1"):
+    """A stand-in for a `tool_use` content block.
+
+    Attributes:
+        type: Always `"tool_use"`.
+        id: The id of the tool call.
+        input: The tool input, i.e. the classification payload.
+        name: Always `"record_classification"`.
+    """
+
+    def __init__(self, payload: dict, block_id: str = "tu_1") -> None:
+        """Script one tool call.
+
+        Args:
+            payload: The tool input the model "returned".
+            block_id: The id of the tool call.
+        """
         self.type = "tool_use"
         self.id = block_id
         self.input = payload
@@ -223,37 +286,90 @@ class FakeBlock:
 
 
 class FakeTextBlock:
+    """A stand-in for a text content block: a reply with no tool call.
+
+    Attributes:
+        type: Always `"text"`.
+        text: The reply text.
+    """
+
     type = "text"
     text = "I think the answer is..."
 
 
 class FakeMessage:
-    def __init__(self, blocks, *, stop_reason="tool_use", in_tok=1000, out_tok=400):
+    """A stand-in for an Anthropic `Message`.
+
+    Attributes:
+        content: The content blocks.
+        stop_reason: Why the model stopped.
+        usage: An object with `input_tokens` and `output_tokens`.
+    """
+
+    def __init__(
+        self, blocks: list, *, stop_reason: str = "tool_use", in_tok: int = 1000, out_tok: int = 400
+    ) -> None:
+        """Script one model reply.
+
+        Args:
+            blocks: The content blocks of the reply.
+            stop_reason: Why the model stopped.
+            in_tok: The input tokens reported.
+            out_tok: The output tokens reported.
+        """
         self.content = blocks
         self.stop_reason = stop_reason
         self.usage = SimpleNamespace(input_tokens=in_tok, output_tokens=out_tok)
 
 
 class FakeAnthropic:
-    """Returns a scripted sequence of responses; records every request so tests
-    can assert on what was actually sent (e.g. that the schema rejection was
-    handed back to the model).
+    """A stand-in for the Anthropic client that replays scripted responses.
+
+    It records every request so tests can assert on what was actually sent
+    (e.g. that the schema rejection was handed back to the model).
+
+    Attributes:
+        calls: The keyword arguments of every `create` call, in order.
+        messages: The client itself, so `client.messages.create` works.
     """
 
-    def __init__(self, responses):
+    def __init__(self, responses: list[FakeMessage]) -> None:
+        """Script the client.
+
+        Args:
+            responses: The replies to return, one per `create` call, in order.
+        """
         self._responses = list(responses)
         self.calls: list[dict] = []
         self.messages = self
 
-    def create(self, **kw):
+    def create(self, **kw: object) -> FakeMessage:
+        """Record a request and return the next scripted reply.
+
+        Args:
+            **kw: The request, as `messages.create` would receive it.
+
+        Returns:
+            The next scripted reply.
+
+        Raises:
+            AssertionError: If every scripted reply has been used.
+        """
         self.calls.append(kw)
         if not self._responses:
             raise AssertionError("FakeAnthropic ran out of scripted responses")
         return self._responses.pop(0)
 
 
-def good_payload(**overrides):
-    """A schema-valid classification payload."""
+def good_payload(**overrides: object) -> dict:
+    """Build a schema-valid classification payload.
+
+    Args:
+        **overrides: Top-level keys to replace in the payload.
+
+    Returns:
+        The payload, as the `record_classification` tool would receive it.
+    """
     base = {
         "evidence": [
             {
