@@ -1,0 +1,9 @@
+# Lint, format and docstring tools. Pinned, so a contributor's machine,
+# pre-commit and CI all agree on what "clean" means. Not needed to run the
+# pipeline: `data_availability_pipeline/v2/requirements.txt` covers that.
+#
+#   pip install -r requirements-dev.txt
+#   ruff check . && ruff format --check . && pydoclint --config=.pydoclint.toml .
+ruff==0.17.5
+pydoclint==0.12.0
+pre-commit>=4.0     # optional: `pre-commit install` runs the checks on commit

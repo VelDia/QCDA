@@ -353,6 +353,32 @@ Both suites run offline, against fakes of every external service. They do not
 exercise a live `--mode api` run; the 25-paper shakedown in step 7a is that
 check.
 
+### Code quality checks
+
+Every pull request is checked by two GitHub Actions workflows, and must pass
+both:
+
+| workflow | what it runs |
+|---|---|
+| `.github/workflows/tests.yml` | both test suites on Python 3.10, 3.11 and 3.13 with `requirements.txt`, and on 3.12 with `requirements.lock` |
+| `.github/workflows/lint.yml` | `ruff check` (lint), `ruff format --check` (formatting) and `pydoclint` (docstrings) |
+
+To run the same checks before pushing, from the repository root:
+
+```bash
+pip install -r requirements-dev.txt
+ruff check .                              # lint; add --fix for the safe fixes
+ruff format .                             # format in place (CI runs it with --check)
+pydoclint --config=.pydoclint.toml .      # docstrings match the signatures
+pre-commit install                        # optional: run all three on every commit
+```
+
+The rules are in `ruff.toml` and `.pydoclint.toml`. In short: every function
+declaration is fully annotated, and every module, class and function has a
+Google-style docstring whose `Args`, `Returns`, `Yields` and `Raises` sections
+match the code. Functions named `test_*` are the one exception: a test's name
+is its documentation.
+
 ---
 
 ## The quantum computing case study
@@ -516,6 +542,10 @@ Any CSV with `openalex_id`, `gold_a` and `gold_b` (case tokens) works as
 ```
 README.md                      this file
 MANIFEST.md                    every file and why it is here
+ruff.toml, .pydoclint.toml     lint, format and docstring rules
+requirements-dev.txt           the pinned lint tools
+.pre-commit-config.yaml        the same checks, on commit
+.github/workflows/             CI: lint.yml and tests.yml, run on every pull request
 openalex_papers.csv            the quantum computing harvest
 dap_final.sqlite               the case-study state
 data_availability_pipeline/

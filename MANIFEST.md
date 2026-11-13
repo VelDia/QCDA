@@ -41,5 +41,15 @@ How to use it is in `README.md`.
 | `tests/` | 11 offline tests, including an end-to-end run against a fake model. |
 | `texts/`, `runs/`, `results/` | Created by the runs. `texts/` is publisher full text: is kept local. |
 
+## Code quality and CI (new)
+| file | role |
+|---|---|
+| `ruff.toml` | Lint and format rules for every Python file: pycodestyle, pyflakes, import order, Google-style docstrings, and an annotation on every function declaration. |
+| `.pydoclint.toml` | Docstring rules ruff does not cover: the `Args`, `Returns`, `Yields` and `Raises` sections must match the signature and the body. |
+| `requirements-dev.txt` | The pinned versions of ruff and pydoclint, so a local run and CI agree. |
+| `.pre-commit-config.yaml` | Optional: the same three checks before each commit. |
+| `.github/workflows/lint.yml` | CI on every pull request: `ruff check`, `ruff format --check`, `pydoclint`. |
+| `.github/workflows/tests.yml` | CI on every pull request: both test suites on Python 3.10 to 3.13. |
+
 ## Left out
 -`out*/` exports, per-batch `scratch/` files, `cross_validation/` (the internal qDATA set for cross validation).

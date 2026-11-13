@@ -1,0 +1,38 @@
+# Lint, format and docstring checks. A pull request must pass all three.
+# To run them locally, see requirements-dev.txt.
+name: Lint
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: ruff and pydoclint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - name: Install the lint tools
+        run: python -m pip install -r requirements-dev.txt
+      - name: Lint (ruff check)
+        run: ruff check --output-format=github .
+      - name: Format (ruff format)
+        if: always()
+        run: ruff format --check --diff .
+      - name: Docstrings (pydoclint)
+        if: always()
+        run: pydoclint --config=.pydoclint.toml .

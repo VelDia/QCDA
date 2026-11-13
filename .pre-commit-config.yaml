@@ -1,0 +1,17 @@
+# Runs the same checks as .github/workflows/lint.yml, before each commit.
+#   pip install -r requirements-dev.txt && pre-commit install
+# Keep the versions in step with requirements-dev.txt.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.5
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+  - repo: https://github.com/jsh9/pydoclint
+    rev: 0.12.0
+    hooks:
+      - id: pydoclint
+        args: [--config=.pydoclint.toml]
+        # Test modules are exempt, as in .pydoclint.toml.
+        exclude: tests/test_.*\.py$

@@ -1,0 +1,13 @@
+[tool.pydoclint]
+# A test's name is its documentation, so test modules are left out. The fakes
+# and every non-test module are checked.
+exclude = '\.git|\.venv|venv|tests/test_.*\.py'
+style = "google"
+arg-type-hints-in-docstring = false
+arg-type-hints-in-signature = true
+check-return-types = false
+check-yield-types = false
+skip-checking-short-docstrings = false
+skip-checking-raises = false
+allow-init-docstring = true
+check-class-attributes = false
