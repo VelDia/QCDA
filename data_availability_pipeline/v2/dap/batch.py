@@ -1,5 +1,4 @@
-"""
-dap.batch — bulk classification through the Message Batches API.
+"""dap.batch — bulk classification through the Message Batches API.
 
 WHY THIS EXISTS. The synchronous path makes one API call per paper and waits.
 At corpus scale that is the wrong shape twice over: it pays full price, and its
@@ -26,17 +25,16 @@ a crash between writing and submitting costs a re-spool, never a lost paper.
 Results stay retrievable for 29 days, so `collect` can be re-run freely; it is
 idempotent against papers that already advanced.
 """
+
 from __future__ import annotations
 
 import json
 import os
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 
-from .classify import TIER_FAST, BATCH_DISCOUNT, _PRICES, _assemble, Usage
+from .classify import _PRICES, BATCH_DISCOUNT, TIER_FAST, Usage, _assemble, grounding_text
 from .schema import Arm, Retrieval, SchemaError, TextSource
-from .classify import grounding_text
 
 #: Well under the 100,000-request / 256 MB ceiling. Smaller batches surface
 #: failures sooner and keep any single loss small; there is no throughput
@@ -50,9 +48,9 @@ MAX_REQUEST_BYTES = 400_000
 
 @dataclass
 class SpoolEntry:
-    custom_id: str          # == openalex_id, sanitised
+    custom_id: str  # == openalex_id, sanitised
     params: dict
-    meta: dict              # carried through so `collect` can rebuild the record
+    meta: dict  # carried through so `collect` can rebuild the record
 
 
 def safe_custom_id(openalex_id: str) -> str:
@@ -78,17 +76,21 @@ class Spool:
         return self.root / f"spool_{len(existing):05d}.jsonl"
 
     def add(self, entry: SpoolEntry) -> None:
-        line = json.dumps({"custom_id": entry.custom_id,
-                           "params": entry.params, "meta": entry.meta})
+        line = json.dumps(
+            {"custom_id": entry.custom_id, "params": entry.params, "meta": entry.meta}
+        )
         if len(line.encode()) > MAX_REQUEST_BYTES:
             # trim the passages rather than drop the paper; note it so the
             # record carries the fact that it was classified on less evidence
             msgs = entry.params["messages"]
-            msgs[0]["content"] = msgs[0]["content"][:60_000] + \
-                "\n\n[passages truncated to fit the batch request size limit]"
+            msgs[0]["content"] = (
+                msgs[0]["content"][:60_000]
+                + "\n\n[passages truncated to fit the batch request size limit]"
+            )
             entry.meta["truncated_input"] = True
-            line = json.dumps({"custom_id": entry.custom_id,
-                               "params": entry.params, "meta": entry.meta})
+            line = json.dumps(
+                {"custom_id": entry.custom_id, "params": entry.params, "meta": entry.meta}
+            )
         with self._open_file().open("a", encoding="utf-8") as f:
             f.write(line + "\n")
 
@@ -104,13 +106,16 @@ class Spool:
 
 
 # ---------------------------------------------------------------------------
-def submit(client, store, spool: Spool, *, flush: bool = False,
-           dry_run: bool = False, log=print) -> int:
+def submit(
+    client, store, spool: Spool, *, flush: bool = False, dry_run: bool = False, log=print
+) -> int:
     """Create batches from spooled requests. Returns the number submitted."""
     files = spool.ready_files(include_partial=flush)
     if not files:
-        log("nothing ready to submit "
-            f"(spool files fill at {BATCH_SIZE}; use --flush to send a partial one)")
+        log(
+            "nothing ready to submit "
+            f"(spool files fill at {BATCH_SIZE}; use --flush to send a partial one)"
+        )
         return 0
 
     submitted = 0
@@ -154,9 +159,11 @@ def poll(client, store, *, log=print) -> dict[str, str]:
         counts = getattr(b, "request_counts", None)
         detail = ""
         if counts is not None:
-            detail = (f"  succeeded={getattr(counts,'succeeded',0)} "
-                      f"errored={getattr(counts,'errored',0)} "
-                      f"processing={getattr(counts,'processing',0)}")
+            detail = (
+                f"  succeeded={getattr(counts, 'succeeded', 0)} "
+                f"errored={getattr(counts, 'errored', 0)} "
+                f"processing={getattr(counts, 'processing', 0)}"
+            )
         log(f"  {bid}  {b.processing_status}{detail}")
     return out
 
@@ -178,7 +185,7 @@ def collect(client, store, *, log=print) -> dict[str, int]:
         if b.processing_status != "ended":
             continue
 
-        members = store.batch_members(bid)          # custom_id -> meta
+        members = store.batch_members(bid)  # custom_id -> meta
         model = store.batch_model(bid)
 
         for result in client.messages.batches.results(bid):
@@ -194,49 +201,70 @@ def collect(client, store, *, log=print) -> dict[str, int]:
             kind = result.result.type
             if kind != "succeeded":
                 tally[kind if kind in tally else "errored"] += 1
-                store.fail(meta["openalex_id"], "classify_batch", kind,
-                           f"batch {bid} returned {kind}",
-                           permanent=(kind == "errored"))
+                store.fail(
+                    meta["openalex_id"],
+                    "classify_batch",
+                    kind,
+                    f"batch {bid} returned {kind}",
+                    permanent=(kind == "errored"),
+                )
                 continue
 
             msg = result.result.message
             if getattr(msg, "stop_reason", None) == "max_tokens":
                 tally["invalid"] += 1
-                store.fail(meta["openalex_id"], "classify_batch", "max_tokens",
-                           "record truncated; re-spool with fewer passages")
+                store.fail(
+                    meta["openalex_id"],
+                    "classify_batch",
+                    "max_tokens",
+                    "record truncated; re-spool with fewer passages",
+                )
                 continue
 
             block = next((c for c in msg.content if c.type == "tool_use"), None)
             if block is None:
                 tally["invalid"] += 1
-                store.fail(meta["openalex_id"], "classify_batch", "no_tool_use",
-                           "model returned no tool_use block")
+                store.fail(
+                    meta["openalex_id"],
+                    "classify_batch",
+                    "no_tool_use",
+                    "model returned no tool_use block",
+                )
                 continue
 
-            usage = Usage(model=model,
-                          input_tokens=getattr(msg.usage, "input_tokens", 0),
-                          output_tokens=getattr(msg.usage, "output_tokens", 0))
+            usage = Usage(
+                model=model,
+                input_tokens=getattr(msg.usage, "input_tokens", 0),
+                output_tokens=getattr(msg.usage, "output_tokens", 0),
+            )
             try:
                 # The spool keeps only a slim copy of each paper's metadata, which
                 # meant collect never saw the passages: grounding was not checked on
                 # the census path, and das_source and locators could not be derived.
                 # Read the real inputs back from the store.
                 full = store.paper_meta(meta["openalex_id"])
-                summary = {k: full.get(k) or [] for k in
-                           ("das_texts", "dataset_ids", "confirmed_datasets")}
+                summary = {
+                    k: full.get(k) or [] for k in ("das_texts", "dataset_ids", "confirmed_datasets")
+                }
                 rec = _assemble(
                     block.input,
-                    openalex_id=meta["openalex_id"], doi=meta.get("doi", ""),
-                    title=meta.get("title", ""), venue=meta.get("venue", ""),
-                    year=meta.get("year"), arm=Arm.coerce(meta.get("arm", "unspecified")),
+                    openalex_id=meta["openalex_id"],
+                    doi=meta.get("doi", ""),
+                    title=meta.get("title", ""),
+                    venue=meta.get("venue", ""),
+                    year=meta.get("year"),
+                    arm=Arm.coerce(meta.get("arm", "unspecified")),
                     model=model,
                     retrieval=Retrieval.coerce(meta.get("retrieval", "metadata_only")),
                     text_source=TextSource.coerce(meta.get("text_source", "none")),
-                    text_url=meta.get("text_url", ""), usage=usage,
-                    grounding=grounding_text(crossref_summary=summary,
-                                             passages=full.get("passages") or []),
+                    text_url=meta.get("text_url", ""),
+                    usage=usage,
+                    grounding=grounding_text(
+                        crossref_summary=summary, passages=full.get("passages") or []
+                    ),
                     passages=full.get("passages") or [],
-                    crossref_das=bool(summary["das_texts"]))
+                    crossref_das=bool(summary["das_texts"]),
+                )
             except SchemaError as e:
                 # No self-correction loop here — there is no conversation to
                 # continue. The paper goes back for a synchronous retry, where
@@ -254,13 +282,22 @@ def collect(client, store, *, log=print) -> dict[str, int]:
     return tally
 
 
-def estimate_cost(n_papers: int, *, model: str = TIER_FAST,
-                  in_tokens: int = 6000, out_tokens: int = 1200) -> tuple[float, float]:
+def estimate_cost(
+    n_papers: int, *, model: str = TIER_FAST, in_tokens: int = 6000, out_tokens: int = 1200
+) -> tuple[float, float]:
     """(synchronous, batched) USD for n papers at the given per-paper token use."""
     pin, pout = _PRICES.get(model, (0.0, 0.0))
     sync = n_papers * (in_tokens * pin + out_tokens * pout) / 1_000_000
     return sync, sync * BATCH_DISCOUNT
 
 
-__all__ = ["Spool", "SpoolEntry", "submit", "poll", "collect",
-           "safe_custom_id", "estimate_cost", "BATCH_SIZE"]
+__all__ = [
+    "Spool",
+    "SpoolEntry",
+    "submit",
+    "poll",
+    "collect",
+    "safe_custom_id",
+    "estimate_cost",
+    "BATCH_SIZE",
+]

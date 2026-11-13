@@ -11,6 +11,7 @@ appears in a string. It is applied where errors are built (`sources._get`) and
 again where they are stored (`Store.fail`), so a new call site cannot reintroduce
 the leak by forgetting one of them.
 """
+
 from __future__ import annotations
 
 import re
@@ -18,7 +19,8 @@ import re
 MASK = "<redacted>"
 
 _PARAM = re.compile(
-    r"(?i)\b(email|mailto|api_key|apikey|api-key|access_token|token)=([^&\s'\"<>()]+)")
+    r"(?i)\b(email|mailto|api_key|apikey|api-key|access_token|token)=([^&\s'\"<>()]+)"
+)
 _MAILTO = re.compile(r"(?i)\bmailto:[^\s'\"<>();]+")
 
 

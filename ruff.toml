@@ -1,0 +1,44 @@
+# Lint and format settings for the whole repository.
+#   ruff check .          lint (add --fix to apply the safe fixes)
+#   ruff format .         format in place
+# CI runs both in check mode on every pull request (.github/workflows/lint.yml).
+line-length = 100
+target-version = "py310"
+# Where first-party imports (`dap`, `fakes`, `common`, ...) resolve from.
+src = [
+    "data_availability_pipeline/v2",
+    "data_availability_pipeline/v2/tests",
+    "data_availability_pipeline/v2/scratch",
+    "benchmark",
+    "post-analysis",
+]
+
+[format]
+docstring-code-format = true
+
+[lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # import order
+    "D",    # docstrings, Google convention (see below)
+    "ANN",  # every function declaration is annotated
+]
+# pydoclint's codes, so `# noqa: DOC...` comments are not reported as unknown.
+external = ["DOC"]
+ignore = [
+    "E501",  # line length is the formatter's job; it leaves long strings alone
+    "E741",  # short names such as `l` are established in the statistics code
+]
+
+[lint.flake8-annotations]
+# `*args: Any` / `**kwargs: Any` is the honest annotation for a pass-through.
+allow-star-arg-any = true
+
+[lint.pydocstyle]
+convention = "google"
+
+[lint.per-file-ignores]
+# A test's name is its documentation; helpers and fakes in tests are documented.
+"**/tests/test_*.py" = ["D103", "D205"]

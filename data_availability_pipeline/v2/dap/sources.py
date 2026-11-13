@@ -1,5 +1,4 @@
-"""
-dap.sources — metadata-first acquisition.
+"""dap.sources — metadata-first acquisition.
 
 Order matters here, and it is the opposite of the v1 script's order.
 
@@ -31,12 +30,13 @@ of papers can be settled from Crossref alone:
 
 Only when metadata is silent do we pay for full text.
 """
+
 from __future__ import annotations
 
 import re
-import unicodedata
 import threading
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any, Optional
 from urllib.parse import unquote, urlparse
@@ -46,6 +46,7 @@ import requests
 from .redact import redact
 from .schema import RepoType, TextSource
 
+
 # ---------------------------------------------------------------------------
 # Polite, per-host rate limiting. One bucket per hostname, shared across threads.
 # ---------------------------------------------------------------------------
@@ -53,11 +54,11 @@ class _HostLimiter:
     def __init__(self, default_qps: float = 3.0):
         self._default = default_qps
         self._rates = {
-            "api.crossref.org": 20.0,     # generous with a mailto (polite pool)
+            "api.crossref.org": 20.0,  # generous with a mailto (polite pool)
             "api.openalex.org": 8.0,
             "api.unpaywall.org": 8.0,
             "api.datacite.org": 5.0,
-            "export.arxiv.org": 0.3,      # arXiv asks for ~1 req / 3 s
+            "export.arxiv.org": 0.3,  # arXiv asks for ~1 req / 3 s
             "arxiv.org": 0.3,
         }
         self._next: dict[str, float] = {}
@@ -130,8 +131,14 @@ class Config:
         return "data-availability-pipeline/2.3 (bibliometric research)"
 
 
-def _get(cfg: Config, url: str, *, params: dict | None = None,
-         headers: dict | None = None, stream: bool = False) -> requests.Response:
+def _get(
+    cfg: Config,
+    url: str,
+    *,
+    params: dict | None = None,
+    headers: dict | None = None,
+    stream: bool = False,
+) -> requests.Response:
     """GET with per-host rate limiting and bounded exponential backoff.
 
     v1 had no retry at all, so a single transient 429 from OpenAlex turned into
@@ -149,9 +156,14 @@ def _get(cfg: Config, url: str, *, params: dict | None = None,
     for attempt in range(cfg.max_retries):
         LIMITER.wait(url)
         try:
-            r = requests.get(url, params=params, headers=h,
-                             timeout=cfg.timeout, stream=stream,
-                             allow_redirects=True)
+            r = requests.get(
+                url,
+                params=params,
+                headers=h,
+                timeout=cfg.timeout,
+                stream=stream,
+                allow_redirects=True,
+            )
         except requests.RequestException as e:
             # The exception text carries the URL and its query string.
             last = TransientError(redact(f"{type(e).__name__}: {e}"))
@@ -168,7 +180,7 @@ def _get(cfg: Config, url: str, *, params: dict | None = None,
                 raise PermanentError("HTTP 404")
             else:
                 raise PermanentError(f"HTTP {r.status_code}")
-        time.sleep(min(2 ** attempt, 30))
+        time.sleep(min(2**attempt, 30))
     raise TransientError(f"exhausted {cfg.max_retries} attempts: {last}")
 
 
@@ -190,9 +202,15 @@ _DAS_NAME_PATTERNS = re.compile(
 )
 
 _DATASET_RELATION_TYPES = {
-    "references", "is-supplemented-by", "issupplementedby",
-    "is-supplement-to", "issupplementto", "has-related-material",
-    "is-derived-from", "isderivedfrom", "is-source-of",
+    "references",
+    "is-supplemented-by",
+    "issupplementedby",
+    "is-supplement-to",
+    "issupplementto",
+    "has-related-material",
+    "is-derived-from",
+    "isderivedfrom",
+    "is-source-of",
 }
 
 #: DataCite spells relation types in CamelCase ("IsSupplementTo") where Crossref
@@ -203,19 +221,23 @@ _CAMEL_TO_DASH = re.compile(r"([a-z0-9])([A-Z])")
 
 def _normalise_doi(doi: str) -> str:
     """Strip resolver prefixes so a bare DOI reaches the API path."""
-    return (doi or "").strip() \
-        .replace("https://doi.org/", "") \
-        .replace("http://dx.doi.org/", "") \
-        .replace("https://dx.doi.org/", "") \
+    return (
+        (doi or "")
+        .strip()
+        .replace("https://doi.org/", "")
+        .replace("http://dx.doi.org/", "")
+        .replace("https://dx.doi.org/", "")
         .replace("http://doi.org/", "")
+    )
 
 
 @dataclass
 class CrossrefFacts:
     """Everything the metadata layer could establish without reading the paper."""
+
     found: bool = False
     das_texts: list[str] = field(default_factory=list)
-    dataset_ids: list[str] = field(default_factory=list)   # DOIs from relations
+    dataset_ids: list[str] = field(default_factory=list)  # DOIs from relations
     dataset_refs: list[str] = field(default_factory=list)  # DOIs from references
     tdm_links: list[dict[str, str]] = field(default_factory=list)
     license_urls: list[str] = field(default_factory=list)
@@ -245,8 +267,11 @@ def crossref_facts(cfg: Config, doi: str) -> CrossrefFacts:
         return CrossrefFacts(found=False)
     doi = _normalise_doi(doi)
     try:
-        r = _get(cfg, CROSSREF_WORKS.format(doi=doi),
-                 params={"mailto": cfg.contact_email} if cfg.contact_email else None)
+        r = _get(
+            cfg,
+            CROSSREF_WORKS.format(doi=doi),
+            params={"mailto": cfg.contact_email} if cfg.contact_email else None,
+        )
     except PermanentError:
         return CrossrefFacts(found=False)
     msg = (r.json() or {}).get("message") or {}
@@ -266,7 +291,7 @@ def crossref_facts(cfg: Config, doi: str) -> CrossrefFacts:
     for a in msg.get("assertion") or []:
         name = str(a.get("name", ""))
         label = str(a.get("label", ""))
-        group = (a.get("group") or {})
+        group = a.get("group") or {}
         gname = str(group.get("name", "")) + " " + str(group.get("label", ""))
         if _DAS_NAME_PATTERNS.search(f"{name} {label} {gname}"):
             val = str(a.get("value", "")).strip()
@@ -292,11 +317,13 @@ def crossref_facts(cfg: Config, doi: str) -> CrossrefFacts:
     # --- TDM full-text links -------------------------------------------------
     for ln in msg.get("link") or []:
         if str(ln.get("intended-application", "")).lower() == "text-mining":
-            facts.tdm_links.append({
-                "url": ln.get("URL", ""),
-                "content_type": ln.get("content-type", ""),
-                "version": ln.get("content-version", ""),
-            })
+            facts.tdm_links.append(
+                {
+                    "url": ln.get("URL", ""),
+                    "content_type": ln.get("content-type", ""),
+                    "version": ln.get("content-version", ""),
+                }
+            )
 
     for lic in msg.get("license") or []:
         if lic.get("URL"):
@@ -332,7 +359,8 @@ _REPO_BY_HOST = [
 
 def repo_type_for(url_or_doi: str) -> RepoType:
     """Classify a repository from its URL. Deterministic — the model is never
-    asked to guess a repository type it can get wrong."""
+    asked to guess a repository type it can get wrong.
+    """
     s = (url_or_doi or "").lower()
     for needle, rt in _REPO_BY_HOST:
         if needle in s:
@@ -369,9 +397,11 @@ def datacite_facts(cfg: Config, doi: str) -> CrossrefFacts:
 
     facts = CrossrefFacts(found=True)
     facts.reference_count = sum(
-        1 for r in (attrs.get("relatedIdentifiers") or [])
-        if str(r.get("relationType","")).lower() in ("cites", "references"))
-    facts.type = ((attrs.get("types") or {}).get("resourceTypeGeneral") or "")
+        1
+        for r in (attrs.get("relatedIdentifiers") or [])
+        if str(r.get("relationType", "")).lower() in ("cites", "references")
+    )
+    facts.type = (attrs.get("types") or {}).get("resourceTypeGeneral") or ""
     facts.container = attrs.get("publisher") or ""
     year = attrs.get("publicationYear")
     facts.published_year = int(year) if str(year).isdigit() else None
@@ -417,7 +447,8 @@ def datacite_facts(cfg: Config, doi: str) -> CrossrefFacts:
 
 def registry_facts(cfg: Config, doi: str) -> CrossrefFacts:
     """Crossref first, DataCite as fallback. DOIs live at one agency or the
-    other; asking only Crossref silently drops everything registered elsewhere."""
+    other; asking only Crossref silently drops everything registered elsewhere.
+    """
     facts = crossref_facts(cfg, doi)
     if facts.found or not doi:
         return facts
@@ -440,10 +471,10 @@ _dc_lock = threading.Lock()
 
 def _datacite_chunk(cfg: Config, dois: list[str]) -> dict[str, dict[str, Any]]:
     """One bulk query. DataCite's Lucene `doi:` filter accepts a disjunction, so
-    N DOIs cost one request instead of N."""
+    N DOIs cost one request instead of N.
+    """
     q = " OR ".join(f'"{d}"' for d in dois)
-    r = _get(cfg, _DATACITE_BULK,
-             params={"query": f"doi:({q})", "page[size]": 1000})
+    r = _get(cfg, _DATACITE_BULK, params={"query": f"doi:({q})", "page[size]": 1000})
     out: dict[str, dict[str, Any]] = {}
     for item in (r.json() or {}).get("data") or []:
         did = str(item.get("id", "")).strip().lower()
@@ -452,8 +483,9 @@ def _datacite_chunk(cfg: Config, dois: list[str]) -> dict[str, dict[str, Any]]:
     return out
 
 
-def datacite_datasets(cfg: Config, dois: list[str], *,
-                      chunk: int = 50) -> dict[str, dict[str, Any]]:
+def datacite_datasets(
+    cfg: Config, dois: list[str], *, chunk: int = 50
+) -> dict[str, dict[str, Any]]:
     """Which of `dois` are DataCite dataset/software records.
 
     Bulk and cached. The per-DOI endpoint made this the dominant cost of the
@@ -478,7 +510,7 @@ def datacite_datasets(cfg: Config, dois: list[str], *,
         want.append(k)
 
     for i in range(0, len(want), chunk):
-        part = want[i:i + chunk]
+        part = want[i : i + chunk]
         try:
             found = _datacite_chunk(cfg, part)
         except (PermanentError, TransientError):
@@ -516,10 +548,16 @@ def is_datacite_dataset(cfg: Config, doi: str) -> Optional[dict[str, Any]]:
 # Full text — only reached when metadata is inconclusive
 # ---------------------------------------------------------------------------
 _CHALLENGE_MARKERS = (
-    "enable javascript and cookies", "checking your browser",
-    "cf-browser-verification", "captcha", "are you a robot",
-    "unusual traffic", "access denied", "just a moment",
-    "verify you are human", "ddos protection",
+    "enable javascript and cookies",
+    "checking your browser",
+    "cf-browser-verification",
+    "captcha",
+    "are you a robot",
+    "unusual traffic",
+    "access denied",
+    "just a moment",
+    "verify you are human",
+    "ddos protection",
 )
 
 
@@ -529,13 +567,25 @@ _CHALLENGE_MARKERS = (
 #: Measured over a 12-paper calibration set: landing pages carried 10-12 of
 #: these, every real article body carried none.
 _CHROME_MARKERS = (
-    "download citation", "share this article", "get shareable link",
-    "explore related subjects", "google scholar", "sign in to",
-    "subscribe to journal", "rent or buy", "access options",
-    "institutional subscriptions", "buy this article", "article purchase",
-    "cookies we use", "skip to main content", "advertisement",
-    "sorry, a shareable link", "discover the latest articles",
-    "content being viewed by others", "learn more about institutional",
+    "download citation",
+    "share this article",
+    "get shareable link",
+    "explore related subjects",
+    "google scholar",
+    "sign in to",
+    "subscribe to journal",
+    "rent or buy",
+    "access options",
+    "institutional subscriptions",
+    "buy this article",
+    "article purchase",
+    "cookies we use",
+    "skip to main content",
+    "advertisement",
+    "sorry, a shareable link",
+    "discover the latest articles",
+    "content being viewed by others",
+    "learn more about institutional",
     "use our pre-submission checklist",
 )
 
@@ -566,33 +616,53 @@ _CHROME_LIMIT = 3
 #: very documents this study is about.
 _RECORD_MARKERS = (
     # OSTI.GOV, EPrints, DSpace
-    "citation formats", "search osti.gov", "osti id:",
-    "local eprints id", "pure uuid", "actions (login required)",
-    "show full item record", "files in this item",
-    "this item appears in the following", "e-pub ahead of print date",
-    "share the qr code", "add to citation manager", "export citation",
+    "citation formats",
+    "search osti.gov",
+    "osti id:",
+    "local eprints id",
+    "pure uuid",
+    "actions (login required)",
+    "show full item record",
+    "files in this item",
+    "this item appears in the following",
+    "e-pub ahead of print date",
+    "share the qr code",
+    "add to citation manager",
+    "export citation",
     # Pure research portals: the page dumps the record in six citation styles.
     # "cite this" and "@article{" are deliberately NOT here: they caught a real
     # paper that carries its own "How to Cite this Work" section and a BibTeX
     # block for self-citation, which is exactly the kind of paper this study is
     # about. Portal furniture only.
-    "research output", "other files and links", "access to document",
+    "research output",
+    "other files and links",
+    "access to document",
     "publication status",
     # German, Italian and Danish institutional catalogues. Pure is deployed in
     # the local language, so the English markers above miss a Danish or Dutch
     # portal serving exactly the same record page.
-    "dokumenttyp", "erweiterte suche", "zeitschriftenaufsatz",
-    "scheda breve", "scheda completa",
-    "adgang til dokumentet", "citationsformater", "originalsprog",
-    "article dans une revue", "fonction : auteur", "afficher plus de d",
-    "r\u00e9duire la vue d\u00e9taill\u00e9e", "idhal",
+    "dokumenttyp",
+    "erweiterte suche",
+    "zeitschriftenaufsatz",
+    "scheda breve",
+    "scheda completa",
+    "adgang til dokumentet",
+    "citationsformater",
+    "originalsprog",
+    "article dans une revue",
+    "fonction : auteur",
+    "afficher plus de d",
+    "r\u00e9duire la vue d\u00e9taill\u00e9e",
+    "idhal",
     # A journal's own index page. Rinton Press serves Quantum Information and
     # Computation's table of contents at the article DOI, and it was stored and
     # queued for coding as the paper. Audited 25 Sep 2026 over every stored
     # passage in the three databases: these catch that page and nothing else;
     # "editorial board" alone appears in 9 real papers, which one marker cannot
     # reject.
-    "guidelines for authors", "editorial board", "author index",
+    "guidelines for authors",
+    "editorial board",
+    "author index",
 )
 
 #: Two, because each of these phrases is specific enough that a pair is
@@ -636,11 +706,15 @@ def repeats_title_like_a_record(text: str, title: str) -> bool:
     if len(key) < 4 or len(words) >= _RECORD_MAX_WORDS:
         return False
     k, span = len(key), len(_words(title)) + 25
-    pos = [i for i in range(len(words) - k + 1)
-           if words[i] == key[0] and words[i:i + k] == key
-           and any(_YEAR.match(w) for w in words[max(0, i - 25):i + span])]
+    pos = [
+        i
+        for i in range(len(words) - k + 1)
+        if words[i] == key[0]
+        and words[i : i + k] == key
+        and any(_YEAR.match(w) for w in words[max(0, i - 25) : i + span])
+    ]
     if any(pos[j + 2] - pos[j] < 400 for j in range(len(pos) - 2)):
-        return True                                   # three styles in one block
+        return True  # three styles in one block
     return any(b - a < 60 for a, b in zip(pos, pos[1:]))
 
 
@@ -745,8 +819,9 @@ class FullText:
 #: one character short of the address the paper prints and verify.py reports
 #: it dead; 58 coded papers had one inside an identifier. Only these seven:
 #: full NFKC would also flatten superscripts, turning 10⁵ into 105.
-_LIGATURES = str.maketrans({chr(c): unicodedata.normalize("NFKC", chr(c))
-                            for c in range(0xFB00, 0xFB07)})
+_LIGATURES = str.maketrans(
+    {chr(c): unicodedata.normalize("NFKC", chr(c)) for c in range(0xFB00, 0xFB07)}
+)
 
 
 def fold_ligatures(text: str) -> str:
@@ -756,9 +831,12 @@ def fold_ligatures(text: str) -> str:
 def _extract_pdf_pdfplumber(content: bytes, max_pages: int = 60) -> str:
     """Last resort. Reconstructs text from glyph positions with no notion of
     columns, so a two-column paper comes back interleaved and word-joined
-    ("Thetechnological world is inthemidstof"). Kept only as a fallback."""
+    ("Thetechnological world is inthemidstof"). Kept only as a fallback.
+    """
     import io
+
     import pdfplumber
+
     parts: list[str] = []
     with pdfplumber.open(io.BytesIO(content)) as pdf:
         for page in pdf.pages[:max_pages]:
@@ -769,15 +847,15 @@ def _extract_pdf_pdfplumber(content: bytes, max_pages: int = 60) -> str:
 def _extract_pdf_fast(content: bytes, max_pages: int = 60) -> str:
     """PyMuPDF with `sort=True`, which recovers reading order on multi-column
     layouts. Measured on a Nature two-column PDF: 7,001 words in 0.33s against
-    pdfplumber's 3,918 garbled words in 0.80s. No document structure."""
+    pdfplumber's 3,918 garbled words in 0.80s. No document structure.
+    """
     try:
         import pymupdf
     except ImportError:
         return _extract_pdf_pdfplumber(content, max_pages)
     try:
         with pymupdf.open(stream=content, filetype="pdf") as doc:
-            pages = [doc[i].get_text("text", sort=True)
-                     for i in range(min(len(doc), max_pages))]
+            pages = [doc[i].get_text("text", sort=True) for i in range(min(len(doc), max_pages))]
         return "\n\n".join(pages)
     except Exception:
         pass
@@ -789,8 +867,7 @@ def _extract_pdf_fast(content: bytes, max_pages: int = 60) -> str:
         return ""
 
 
-def _extract_pdf_grobid(cfg: Config,
-                        content: bytes) -> Optional[tuple[str, list[tuple[int, str]]]]:
+def _extract_pdf_grobid(cfg: Config, content: bytes) -> Optional[tuple[str, list[tuple[int, str]]]]:
     """Full structure via a GROBID service: sections, body separated from the
     bibliography, figure captions. Returns None if the service is unreachable or
     slow, so the caller can fall back rather than lose the paper.
@@ -810,6 +887,7 @@ def _extract_pdf_grobid(cfg: Config,
         if r.status_code != 200 or not r.content:
             return None
         from bs4 import BeautifulSoup
+
         soup = BeautifulSoup(r.content, "lxml-xml")
         body = soup.find("body")
         if body is None:
@@ -839,10 +917,12 @@ def _extract_pdf_grobid(cfg: Config,
         return None
 
 
-def _extract_pdf(content: bytes, max_pages: int = 60,
-                 cfg: Optional[Config] = None) -> tuple[str, list[tuple[int, str]]]:
+def _extract_pdf(
+    content: bytes, max_pages: int = 60, cfg: Optional[Config] = None
+) -> tuple[str, list[tuple[int, str]]]:
     """Returns (text, sections). `sections` is empty for parsers with no
-    structure, which is every path except GROBID."""
+    structure, which is every path except GROBID.
+    """
     if cfg is not None:
         got = _extract_pdf_grobid(cfg, content)
         if got:
@@ -852,12 +932,14 @@ def _extract_pdf(content: bytes, max_pages: int = 60,
 
 def _extract_html(content: bytes) -> str:
     from bs4 import BeautifulSoup
+
     soup = BeautifulSoup(content, "lxml")
     for tag in soup(["script", "style", "nav", "header", "footer", "aside"]):
         tag.decompose()
     node = soup.find("article") or soup.find("main") or soup.body
-    return fold_ligatures(node.get_text("\n", strip=True) if node
-                          else soup.get_text("\n", strip=True))
+    return fold_ligatures(
+        node.get_text("\n", strip=True) if node else soup.get_text("\n", strip=True)
+    )
 
 
 def _citation_pdf_url(content: bytes) -> Optional[str]:
@@ -870,8 +952,8 @@ def _citation_pdf_url(content: bytes) -> Optional[str]:
     """
     try:
         from bs4 import BeautifulSoup
-        tag = BeautifulSoup(content, "lxml").find(
-            "meta", attrs={"name": "citation_pdf_url"})
+
+        tag = BeautifulSoup(content, "lxml").find("meta", attrs={"name": "citation_pdf_url"})
     except Exception:
         return None
     href = tag.get("content") if tag else None
@@ -879,8 +961,9 @@ def _citation_pdf_url(content: bytes) -> Optional[str]:
     return href if href.startswith(("http://", "https://")) else None
 
 
-def _fetch_and_parse(cfg: Config, url: str, source: TextSource, title: str,
-                     *, _followed: bool = False) -> tuple[Optional[FullText], str]:
+def _fetch_and_parse(
+    cfg: Config, url: str, source: TextSource, title: str, *, _followed: bool = False
+) -> tuple[Optional[FullText], str]:
     """Fetch and parse one location. Returns (text or None, outcome).
 
     TransientError is deliberately not caught. It used to be, alongside
@@ -901,8 +984,13 @@ def _fetch_and_parse(cfg: Config, url: str, source: TextSource, title: str,
     try:
         if is_pdf:
             text, sections = _extract_pdf(r.content, cfg=cfg)
-        elif "xml" in ctype and not head.lstrip().startswith(b"<!") and b"<html" not in r.content[:2000].lower():
+        elif (
+            "xml" in ctype
+            and not head.lstrip().startswith(b"<!")
+            and b"<html" not in r.content[:2000].lower()
+        ):
             from bs4 import BeautifulSoup
+
             text = fold_ligatures(BeautifulSoup(r.content, "lxml-xml").get_text("\n", strip=True))
         else:
             text = _extract_html(r.content)
@@ -910,8 +998,7 @@ def _fetch_and_parse(cfg: Config, url: str, source: TextSource, title: str,
         return None, f"parse_error: {type(e).__name__}"
     html: Optional[FullText] = None
     if looks_like_article(text, title):
-        html = FullText(text=text, source=source, url=url, ok=True,
-                        sections=sections)
+        html = FullText(text=text, source=source, url=url, ok=True, sections=sections)
     # An HTML page that names its own PDF is at best a worse copy of it, and at
     # worst a catalogue record that merely describes it. Prefer the PDF.
     #
@@ -924,8 +1011,7 @@ def _fetch_and_parse(cfg: Config, url: str, source: TextSource, title: str,
     if not (_followed or is_pdf):
         pdf_url = _citation_pdf_url(r.content)
         if pdf_url and pdf_url != url:
-            better, _ = _fetch_and_parse(cfg, pdf_url, source, title,
-                                         _followed=True)
+            better, _ = _fetch_and_parse(cfg, pdf_url, source, title, _followed=True)
             if better is not None:
                 return better, "ok"
     if html is not None:
@@ -947,8 +1033,9 @@ def openalex_family_names(work: dict) -> list[str]:
     """
     out = []
     for a in work.get("authorships") or []:
-        name = ((a.get("author") or {}).get("display_name")
-                or a.get("raw_author_name") or "").strip()
+        name = (
+            (a.get("author") or {}).get("display_name") or a.get("raw_author_name") or ""
+        ).strip()
         if name:
             out.append(name.split()[-1].lower())
     return out
@@ -962,13 +1049,14 @@ def arxiv_id_from_openalex(work: dict) -> Optional[str]:
     a wrong classification rather than a missing one. The id is usually already
     in the metadata; use it.
     """
-    for loc in (work.get("locations") or []):
-        src = (loc.get("source") or {})
+    for loc in work.get("locations") or []:
+        src = loc.get("source") or {}
         landing = loc.get("landing_page_url") or ""
         pdf = loc.get("pdf_url") or ""
         if "arxiv.org" in (landing + pdf).lower():
-            m = re.search(r"arxiv\.org/(?:abs|pdf)/([0-9]{4}\.[0-9]{4,5}(?:v\d+)?)",
-                          landing + " " + pdf, re.I)
+            m = re.search(
+                r"arxiv\.org/(?:abs|pdf)/([0-9]{4}\.[0-9]{4,5}(?:v\d+)?)", landing + " " + pdf, re.I
+            )
             if m:
                 return m.group(1)
         if (src.get("display_name") or "").lower().startswith("arxiv"):
@@ -995,10 +1083,13 @@ def arxiv_id_from_openalex(work: dict) -> Optional[str]:
 #: page stored as their text, 21 of them recorded as `full_text`, and three
 #: papers were coded off one before this went in. Marker phrases would have
 #: caught about half; the host is deterministic.
-_INDEX_ONLY_HOSTS = frozenset({
-    "doaj.org", "www.doaj.org",
-    "pubmed.ncbi.nlm.nih.gov",
-})
+_INDEX_ONLY_HOSTS = frozenset(
+    {
+        "doaj.org",
+        "www.doaj.org",
+        "pubmed.ncbi.nlm.nih.gov",
+    }
+)
 
 #: Paths that serve a catalogue record on a host that ALSO serves real text, so
 #: the host itself must not be blocked. OSTI.GOV is the case that forced this:
@@ -1020,8 +1111,7 @@ def _is_catalogue_url(url: str) -> bool:
     return any(host == h and u.path.startswith(pre) for h, pre in _CATALOGUE_PATHS)
 
 
-def _local_pdf(cfg: Config, *, doi: str, work: dict,
-               title: str) -> Optional[FullText]:
+def _local_pdf(cfg: Config, *, doi: str, work: dict, title: str) -> Optional[FullText]:
     """A PDF someone downloaded by hand, if one is there for this paper.
 
     Rule 8 forbids bypassing a publisher's bot wall. It does not forbid a
@@ -1032,6 +1122,7 @@ def _local_pdf(cfg: Config, *, doi: str, work: dict,
     if not cfg.pdf_dir:
         return None
     import os
+
     names = []
     if doi:
         d = _normalise_doi(doi)
@@ -1053,8 +1144,13 @@ def _local_pdf(cfg: Config, *, doi: str, work: dict,
         # no text layer, or the wrong paper filed under this name, is not usable
         # just because it is local.
         if looks_like_article(text, title):
-            return FullText(text=text, source=TextSource.LOCAL_PDF,
-                            url=f"file://{path}", ok=True, sections=sections)
+            return FullText(
+                text=text,
+                source=TextSource.LOCAL_PDF,
+                url=f"file://{path}",
+                ok=True,
+                sections=sections,
+            )
     return None
 
 
@@ -1083,11 +1179,38 @@ _MIN_DISTINCTIVE = 6
 
 #: Words that identify no paper. Kept small and generic on purpose: this is a
 #: floor on how much signal the shorter title carries, not a topic filter.
-_TITLE_STOP = frozenset((
-    "a", "an", "and", "as", "at", "by", "for", "from", "in", "into", "of", "on",
-    "or", "the", "to", "via", "with", "using", "toward", "towards", "its",
-    "new", "novel", "based", "approach", "study", "review", "survey",
-))
+_TITLE_STOP = frozenset(
+    (
+        "a",
+        "an",
+        "and",
+        "as",
+        "at",
+        "by",
+        "for",
+        "from",
+        "in",
+        "into",
+        "of",
+        "on",
+        "or",
+        "the",
+        "to",
+        "via",
+        "with",
+        "using",
+        "toward",
+        "towards",
+        "its",
+        "new",
+        "novel",
+        "based",
+        "approach",
+        "study",
+        "review",
+        "survey",
+    )
+)
 
 #: A preprint precedes its version of record, sometimes by years. Beyond this
 #: the match is more likely a different paper by the same group.
@@ -1108,7 +1231,8 @@ def _title_overlap(a: str, b: str) -> float:
 def _title_contains(a: str, b: str) -> tuple[float, int]:
     """How much of the shorter title the longer one covers, and how many
     distinctive words the shorter one has to offer. Both are needed: coverage
-    alone would match any short generic title inside a longer one."""
+    alone would match any short generic title inside a longer one.
+    """
     x, y = _norm_title(a), _norm_title(b)
     if not x or not y:
         return 0.0, 0
@@ -1125,14 +1249,16 @@ def titles_agree(ours: str, theirs: str) -> tuple[bool, str]:
     if cov >= _TITLE_CONTAIN and distinctive >= _MIN_DISTINCTIVE:
         return True, f"title {ov:.2f} but {cov:.2f} contained on {distinctive} words"
     if cov >= _TITLE_CONTAIN:
-        return False, (f"title contained {cov:.2f} but only {distinctive} distinctive "
-                       f"words, too generic to identify a paper")
+        return False, (
+            f"title contained {cov:.2f} but only {distinctive} distinctive "
+            f"words, too generic to identify a paper"
+        )
     return False, f"closest title overlap {ov:.2f} < {_TITLE_MATCH}"
 
 
-def arxiv_search(cfg: Config, *, title: str, authors: list[str],
-                 year: Optional[int] = None,
-                 max_results: int = 8) -> tuple[Optional[str], str]:
+def arxiv_search(
+    cfg: Config, *, title: str, authors: list[str], year: Optional[int] = None, max_results: int = 8
+) -> tuple[Optional[str], str]:
     """Find a paper's arXiv id by title, and refuse the match unless the authors
     agree. Returns (arxiv_id or None, why).
 
@@ -1158,19 +1284,21 @@ def arxiv_search(cfg: Config, *, title: str, authors: list[str],
     if not authors:
         return None, "no authors on record to verify against"
     try:
-        r = _get(cfg, ARXIV_API, params={
-            "search_query": f'ti:"{title}"', "max_results": max_results,
-            "start": 0})
+        r = _get(
+            cfg,
+            ARXIV_API,
+            params={"search_query": f'ti:"{title}"', "max_results": max_results, "start": 0},
+        )
     except (PermanentError, TransientError) as e:
         return None, f"arxiv query failed: {e}"
 
     from bs4 import BeautifulSoup
+
     soup = BeautifulSoup(r.content, "lxml-xml")
     ours = {a for a in authors if a}
     best = ""
     for entry in soup.find_all("entry"):
-        cand_title = (entry.find("title").get_text(" ", strip=True)
-                      if entry.find("title") else "")
+        cand_title = entry.find("title").get_text(" ", strip=True) if entry.find("title") else ""
         agreed, why_title = titles_agree(title, cand_title)
         if not agreed:
             best = best or why_title
@@ -1198,8 +1326,9 @@ def arxiv_search(cfg: Config, *, title: str, authors: list[str],
         if m:
             # `why_title` says which rule admitted it: a plain overlap, or
             # containment despite a dropped subtitle. An auditor needs to know.
-            return m.group(1), (f"{why_title}, author '{sorted(shared)[0]}'"
-                                f"{', year ' + str(year) if year else ''}")
+            return m.group(1), (
+                f"{why_title}, author '{sorted(shared)[0]}'{', year ' + str(year) if year else ''}"
+            )
     return None, best or "no arxiv entry matched"
 
 
@@ -1231,10 +1360,14 @@ def _publisher_hosts(work: dict, doi: str, facts: CrossrefFacts) -> frozenset[st
     """
     own = (doi or "").strip().lower()
     oa = work.get("best_oa_location") or work.get("open_access") or {}
-    locs = [loc for loc in (work.get("locations") or [])
-            if own and _resolver_doi(loc.get("landing_page_url")) == own]
-    if ((oa.get("source") or {}).get("type") != "repository"
-            or (own and _resolver_doi(oa.get("landing_page_url")) == own)):
+    locs = [
+        loc
+        for loc in (work.get("locations") or [])
+        if own and _resolver_doi(loc.get("landing_page_url")) == own
+    ]
+    if (oa.get("source") or {}).get("type") != "repository" or (
+        own and _resolver_doi(oa.get("landing_page_url")) == own
+    ):
         locs.append(oa)
     urls = [ln.get("url") for ln in facts.tdm_links]
     for loc in locs:
@@ -1243,8 +1376,9 @@ def _publisher_hosts(work: dict, doi: str, facts: CrossrefFacts) -> frozenset[st
     return frozenset(hosts - {""} - _DOI_RESOLVERS)
 
 
-def retrieve_full_text(cfg: Config, *, work: dict, doi: str, title: str,
-                       facts: CrossrefFacts) -> FullText:
+def retrieve_full_text(
+    cfg: Config, *, work: dict, doi: str, title: str, facts: CrossrefFacts
+) -> FullText:
     """Cascade, cheapest and most reliable first.
 
     Crossref TDM links come first because they are what the publisher itself
@@ -1275,7 +1409,7 @@ def retrieve_full_text(cfg: Config, *, work: dict, doi: str, title: str,
     # and arXiv are still waited for.
     publisher = _publisher_hosts(work, doi, facts)
     own_doi = (doi or "").strip().lower()
-    mirrors: set[str] = set()       # URLs of mirrors that failed transiently
+    mirrors: set[str] = set()  # URLs of mirrors that failed transiently
 
     def is_mirror(url: str, source: TextSource) -> bool:
         if source not in (TextSource.OPENALEX_OA, TextSource.UNPAYWALL):
@@ -1288,19 +1422,22 @@ def retrieve_full_text(cfg: Config, *, work: dict, doi: str, title: str,
         return host not in publisher and host not in _ARXIV_HOSTS
 
     def throttled(*, counting_mirrors: bool = False) -> bool:
-        return any(a["outcome"].startswith("transient")
-                   and (counting_mirrors or a["url"] not in mirrors)
-                   for a in attempts)
+        return any(
+            a["outcome"].startswith("transient") and (counting_mirrors or a["url"] not in mirrors)
+            for a in attempts
+        )
 
     def retry_later() -> TransientError:
         # Every outcome goes into the message, so the failure row says what to retry.
         return TransientError(
             "a preferred location failed only temporarily; retry rather than settle "
             "for what the cascade found after it: "
-            + "; ".join(f"{a['source']} {a['url']} -> {a['outcome']}" for a in attempts))
+            + "; ".join(f"{a['source']} {a['url']} -> {a['outcome']}" for a in attempts)
+        )
 
-    def attempt(url: str, source: TextSource, *,
-                publisher_copy: bool = False) -> Optional[FullText]:
+    def attempt(
+        url: str, source: TextSource, *, publisher_copy: bool = False
+    ) -> Optional[FullText]:
         nonlocal partial
         if not url or url in seen:
             return None
@@ -1328,8 +1465,14 @@ def retrieve_full_text(cfg: Config, *, work: dict, doi: str, title: str,
             # an incomplete body still beats no text at all.
             note(url, source, "incomplete")
             if partial is None:
-                partial = FullText(text=ft.text, source=ft.source, url=ft.url,
-                                   ok=True, complete=False, sections=ft.sections)
+                partial = FullText(
+                    text=ft.text,
+                    source=ft.source,
+                    url=ft.url,
+                    ok=True,
+                    complete=False,
+                    sections=ft.sections,
+                )
             return None
         note(url, source, outcome)
         if ft is None:
@@ -1348,7 +1491,7 @@ def retrieve_full_text(cfg: Config, *, work: dict, doi: str, title: str,
         if ft:
             return ft
 
-    oa = (work.get("best_oa_location") or work.get("open_access") or {})
+    oa = work.get("best_oa_location") or work.get("open_access") or {}
     for url in filter(None, [oa.get("pdf_url"), oa.get("url"), oa.get("oa_url")]):
         ft = attempt(url, TextSource.OPENALEX_OA)
         if ft:
@@ -1365,15 +1508,18 @@ def retrieve_full_text(cfg: Config, *, work: dict, doi: str, title: str,
     # the same paper sits readable in an institutional repository, PMC or OSTI.
     # Measured on the first live run: this recovered 22 of 79 otherwise-unusable
     # papers, so skipping the list discarded a quarter of the review queue.
-    for loc in (work.get("locations") or []):
+    for loc in work.get("locations") or []:
         for url in (loc.get("pdf_url"), loc.get("landing_page_url")):
             ft = attempt(url, TextSource.OPENALEX_OA)
             if ft:
                 return ft
 
     if doi and not cfg.contact_email:
-        note(f"https://api.unpaywall.org/v2/{doi}", TextSource.UNPAYWALL,
-             "skipped: no DAP_CONTACT_EMAIL (Unpaywall requires one)")
+        note(
+            f"https://api.unpaywall.org/v2/{doi}",
+            TextSource.UNPAYWALL,
+            "skipped: no DAP_CONTACT_EMAIL (Unpaywall requires one)",
+        )
     if doi and cfg.contact_email:
         # Only the lookup is guarded here. The attempts below must be able to
         # raise: a blanket except around them would swallow retry_later().
@@ -1387,8 +1533,9 @@ def retrieve_full_text(cfg: Config, *, work: dict, doi: str, title: str,
         except PermanentError as e:
             note(api, TextSource.UNPAYWALL, f"permanent: {e}")
         for url in filter(None, [best.get("url_for_pdf"), best.get("url")]):
-            ft = attempt(url, TextSource.UNPAYWALL,
-                         publisher_copy=best.get("host_type") == "publisher")
+            ft = attempt(
+                url, TextSource.UNPAYWALL, publisher_copy=best.get("host_type") == "publisher"
+            )
             if ft:
                 return ft
 
@@ -1406,10 +1553,10 @@ def retrieve_full_text(cfg: Config, *, work: dict, doi: str, title: str,
     # recorded in the metadata. Search for one by title and refuse it unless the
     # authors agree — see `arxiv_search` for why that check is not optional.
     if not arxiv_id and title and facts.authors:
-        found, why = arxiv_search(cfg, title=title, authors=facts.authors,
-                                  year=facts.published_year)
-        note(ARXIV_API, TextSource.ARXIV,
-             f"search: {why}" if found else f"search failed: {why}")
+        found, why = arxiv_search(
+            cfg, title=title, authors=facts.authors, year=facts.published_year
+        )
+        note(ARXIV_API, TextSource.ARXIV, f"search: {why}" if found else f"search failed: {why}")
         if found:
             ft = attempt(f"https://arxiv.org/pdf/{found}", TextSource.ARXIV)
             if ft:
@@ -1423,13 +1570,21 @@ def retrieve_full_text(cfg: Config, *, work: dict, doi: str, title: str,
     if partial is not None:
         partial.attempts = attempts
         return partial
-    return FullText(text="", source=TextSource.NONE, url="", ok=False,
-                    attempts=attempts)
+    return FullText(text="", source=TextSource.NONE, url="", ok=False, attempts=attempts)
 
 
 __all__ = [
-    "Config", "CrossrefFacts", "crossref_facts", "is_datacite_dataset",
-    "repo_type_for", "retrieve_full_text", "looks_like_article",
-    "arxiv_id_from_openalex", "openalex_family_names", "arxiv_search", "FullText", "TransientError",
+    "Config",
+    "CrossrefFacts",
+    "crossref_facts",
+    "is_datacite_dataset",
+    "repo_type_for",
+    "retrieve_full_text",
+    "looks_like_article",
+    "arxiv_id_from_openalex",
+    "openalex_family_names",
+    "arxiv_search",
+    "FullText",
+    "TransientError",
     "PermanentError",
 ]

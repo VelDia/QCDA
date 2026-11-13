@@ -15,6 +15,7 @@ Case tokens, numbers and confidence tokens are imported from dap/schema.py, so
 the form cannot offer or store a value the scheme does not have. The
 classifier's own codes are never sent to the page: the review stays blind.
 """
+
 import argparse
 import csv
 import json
@@ -33,9 +34,13 @@ sys.path.insert(0, str(HERE.parent / "data_availability_pipeline" / "v2"))
 from dap.schema import CASE_LABEL, CASE_NUMBER, Case, Confidence  # noqa: E402
 
 NEW_COLS = [
-    "human_review_a_case", "human_review_a_case_num",
-    "human_review_b_case", "human_review_b_case_num",
-    "human_review_confidence", "human_review_evidence", "human_review_notes",
+    "human_review_a_case",
+    "human_review_a_case_num",
+    "human_review_b_case",
+    "human_review_b_case_num",
+    "human_review_confidence",
+    "human_review_evidence",
+    "human_review_notes",
     "human_review_at",
 ]
 
@@ -44,15 +49,17 @@ NEW_COLS = [
 CASE_HINT = {
     Case.NOT_APPLICABLE: "The axis does not apply: no external data analysed (A) / nothing generated (B)",
     Case.OPENLY_ACCESSIBLE: "A concrete identifier — DOI, URL, accession, repository",
-    Case.ACCESS_NOT_PROVIDED: "Identifiable (e.g. \"we use ImageNet\") but no path given",
-    Case.INSUFFICIENTLY_SPECIFIED: "Cannot even identify the material (\"an internal corpus\")",
+    Case.ACCESS_NOT_PROVIDED: 'Identifiable (e.g. "we use ImageNet") but no path given',
+    Case.INSUFFICIENTLY_SPECIFIED: 'Cannot even identify the material ("an internal corpus")',
     Case.ACCESS_UNRESOLVABLE: "A specific path is given, and it fails",
     Case.ON_REQUEST: "Offered on contact, however hedged",
     Case.EXPLICITLY_RESTRICTED: "Stated that it cannot be shared",
 }
 
-CASES = [{"token": c.value, "num": CASE_NUMBER[c], "label": CASE_LABEL[c],
-          "hint": CASE_HINT[c]} for c in Case]
+CASES = [
+    {"token": c.value, "num": CASE_NUMBER[c], "label": CASE_LABEL[c], "hint": CASE_HINT[c]}
+    for c in Case
+]
 CONFIDENCES = [c.value for c in Confidence]
 
 
@@ -61,14 +68,16 @@ def load_copies(db: Path, ids: list[str]) -> dict[str, dict]:
 
     Opened read-only: SQLite is the pipeline's state and this app never writes
     it. Only meta_json is read -- record_json holds the classifier's codes and
-    rationale, and the page must not see them."""
+    rationale, and the page must not see them.
+    """
     if not db.exists():
         return {}
     con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     q = ",".join("?" * len(ids))
     out = {}
     for oid, meta in con.execute(
-            f"SELECT openalex_id, meta_json FROM papers WHERE openalex_id IN ({q})", ids):
+        f"SELECT openalex_id, meta_json FROM papers WHERE openalex_id IN ({q})", ids
+    ):
         m = json.loads(meta or "{}")
         read_url = m.get("text_url") or ""
         links, seen = [], set()
@@ -77,17 +86,30 @@ def load_copies(db: Path, ids: list[str]) -> dict[str, dict]:
             if not url or url in seen:
                 continue
             seen.add(url)
-            links.append({"name": (loc.get("source") or {}).get("display_name") or "copy",
-                          "url": url, "pdf": bool(loc.get("pdf_url")),
-                          "read": url == read_url})
+            links.append(
+                {
+                    "name": (loc.get("source") or {}).get("display_name") or "copy",
+                    "url": url,
+                    "pdf": bool(loc.get("pdf_url")),
+                    "read": url == read_url,
+                }
+            )
         if read_url and read_url not in seen:
-            links.append({"name": "pipeline's copy", "url": read_url,
-                          "pdf": read_url.endswith(".pdf"), "read": True})
+            links.append(
+                {
+                    "name": "pipeline's copy",
+                    "url": read_url,
+                    "pdf": read_url.endswith(".pdf"),
+                    "read": True,
+                }
+            )
         out[oid] = {
             "links": links,
             "text_source": m.get("text_source") or "",
-            "passages": [{"keywords": p.get("keywords") or [], "text": p.get("text") or ""}
-                         for p in m.get("passages") or []],
+            "passages": [
+                {"keywords": p.get("keywords") or [], "text": p.get("text") or ""}
+                for p in m.get("passages") or []
+            ],
         }
     con.close()
     return out
@@ -130,12 +152,18 @@ class Store:
     def public_rows(self):
         out = []
         for r in self.rows:
-            out.append({
-                "id": r["openalex_id"], "doi": r["doi"], "title": r["title"],
-                "year": r["year"], "arm": r["arm"], "status": r["status"],
-                "classified": bool(r["a_case"] or r["b_case"]),
-                **{c: r[c] for c in NEW_COLS},
-            })
+            out.append(
+                {
+                    "id": r["openalex_id"],
+                    "doi": r["doi"],
+                    "title": r["title"],
+                    "year": r["year"],
+                    "arm": r["arm"],
+                    "status": r["status"],
+                    "classified": bool(r["a_case"] or r["b_case"]),
+                    **{c: r[c] for c in NEW_COLS},
+                }
+            )
         return out
 
     def save(self, payload: dict):
@@ -150,16 +178,18 @@ class Store:
             row = next((r for r in self.rows if r["openalex_id"] == payload.get("id")), None)
             if row is None:
                 raise ValueError("unknown openalex_id")
-            row.update({
-                "human_review_a_case": a,
-                "human_review_a_case_num": str(CASE_NUMBER[tokens[a]]),
-                "human_review_b_case": b,
-                "human_review_b_case_num": str(CASE_NUMBER[tokens[b]]),
-                "human_review_confidence": conf,
-                "human_review_evidence": (payload.get("evidence") or "").strip(),
-                "human_review_notes": (payload.get("notes") or "").strip(),
-                "human_review_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            })
+            row.update(
+                {
+                    "human_review_a_case": a,
+                    "human_review_a_case_num": str(CASE_NUMBER[tokens[a]]),
+                    "human_review_b_case": b,
+                    "human_review_b_case_num": str(CASE_NUMBER[tokens[b]]),
+                    "human_review_confidence": conf,
+                    "human_review_evidence": (payload.get("evidence") or "").strip(),
+                    "human_review_notes": (payload.get("notes") or "").strip(),
+                    "human_review_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                }
+            )
             self._write()
             return {c: row[c] for c in NEW_COLS}
 
@@ -182,9 +212,17 @@ def make_handler(store: Store):
                 oid = parse_qs(urlsplit(self.path).query).get("id", [""])[0]
                 self._send(200, json.dumps(store.copies.get(oid, {"links": [], "passages": []})))
             elif self.path == "/api/rows":
-                self._send(200, json.dumps({"rows": store.public_rows(), "cases": CASES,
-                                            "confidences": CONFIDENCES,
-                                            "csv": str(store.path)}))
+                self._send(
+                    200,
+                    json.dumps(
+                        {
+                            "rows": store.public_rows(),
+                            "cases": CASES,
+                            "confidences": CONFIDENCES,
+                            "csv": str(store.path),
+                        }
+                    ),
+                )
             else:
                 self._send(404, json.dumps({"error": "not found"}))
 
@@ -458,13 +496,19 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("csv", nargs="?", default=str(HERE / "human_review.csv"))
     ap.add_argument("--port", type=int, default=8765)
-    ap.add_argument("--db", default=str(HERE.parent / "dap_final.sqlite"),
-                    help="pipeline database to read copies and passages from (read-only)")
+    ap.add_argument(
+        "--db",
+        default=str(HERE.parent / "dap_final.sqlite"),
+        help="pipeline database to read copies and passages from (read-only)",
+    )
     args = ap.parse_args()
     store = Store(Path(args.csv).resolve(), Path(args.db).resolve())
     print(f"copies/passages for {len(store.copies)} rows from {args.db}", flush=True)
     srv = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(store))
-    print(f"reviewing {store.path} ({len(store.rows)} rows) at http://127.0.0.1:{args.port}", flush=True)
+    print(
+        f"reviewing {store.path} ({len(store.rows)} rows) at http://127.0.0.1:{args.port}",
+        flush=True,
+    )
     srv.serve_forever()
 
 

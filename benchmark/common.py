@@ -3,6 +3,7 @@
 The vocabulary is imported from the pipeline's own schema, so the baselines
 are scored against exactly the seven tokens the pipeline can emit.
 """
+
 from __future__ import annotations
 
 import csv
@@ -17,12 +18,12 @@ ROOT = HERE.parent
 PIPELINE = ROOT / "data_availability_pipeline" / "v2"
 sys.path.insert(0, str(PIPELINE))
 
-from dap.schema import CASE_NUMBER, Case  # noqa: E402
 from dap.classify import KNOWN_PRICES, _norm  # noqa: E402
+from dap.schema import CASE_NUMBER, Case  # noqa: E402
 
 LABELS = [c.value for c in Case]
 NUM = {c.value: CASE_NUMBER[c] for c in Case}
-INVALID = "__invalid__"            # no answer, unparseable answer, or a non-token
+INVALID = "__invalid__"  # no answer, unparseable answer, or a non-token
 CONFIDENCES = ("high", "medium", "low")
 CONF_RANK = {"high": 2, "medium": 1, "low": 0}
 
@@ -81,7 +82,8 @@ def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
 
 def grounded(quote: str, text: str) -> bool | None:
     """Is a quoted piece of evidence actually in the text the model was given?
-    The same normalisation the pipeline's grounding check uses."""
+    The same normalisation the pipeline's grounding check uses.
+    """
     q = _norm(quote or "")
     if not q:
         return None
@@ -138,11 +140,12 @@ def baseline_system(variant: str) -> str:
         # close pairs, the no-data exception, the evidence rules) but none of
         # its machinery. Separates "a better prompt" from "a pipeline".
         from dap.classify import SYSTEM_PROMPT
-        answer_format = DEFINITIONS[DEFINITIONS.index("Answer with one JSON object"):]
-        return (SYSTEM_PROMPT
-                + "\n\nIN THIS RUN you receive the paper's full text instead of "
-                  "passages, and no metadata. There is no tool to call.\n\n"
-                + answer_format)
+
+        answer_format = DEFINITIONS[DEFINITIONS.index("Answer with one JSON object") :]
+        return (
+            SYSTEM_PROMPT + "\n\nIN THIS RUN you receive the paper's full text instead of "
+            "passages, and no metadata. There is no tool to call.\n\n" + answer_format
+        )
     raise ValueError(f"unknown variant {variant!r}")
 
 
@@ -175,9 +178,11 @@ def parse_answer(text: str) -> tuple[dict, str]:
         conf = str(raw.get("confidence", "")).strip().lower()
         if obj is not None and case not in LABELS:
             errors.append(f"{ax}: {case!r} is not a case token")
-        out[ax] = {"case": case if case in LABELS else INVALID,
-                   "confidence": conf if conf in CONFIDENCES else "",
-                   "evidence": str(raw.get("evidence") or "")}
+        out[ax] = {
+            "case": case if case in LABELS else INVALID,
+            "confidence": conf if conf in CONFIDENCES else "",
+            "evidence": str(raw.get("evidence") or ""),
+        }
     return out, "; ".join(e for e in errors if e)
 
 

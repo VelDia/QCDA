@@ -1,5 +1,4 @@
-"""
-dap.verify — does the declared access path actually work?
+"""dap.verify — does the declared access path actually work?
 
 This module is the only thing permitted to set `Actual`, and the only thing
 that can promote a case to `access_unresolvable`. The classifier is explicitly
@@ -22,6 +21,7 @@ Three fixes:
     separates "the link works" from "the data is there", which is precisely the
     distinction Case 5 rests on.
 """
+
 from __future__ import annotations
 
 import itertools
@@ -33,7 +33,7 @@ from urllib.parse import urlparse, urlsplit, urlunsplit
 import requests
 
 from .schema import Actual, Case, Pinned
-from .sources import Config, LIMITER
+from .sources import LIMITER, Config
 
 #: No contact address: this goes to every repository and dataset host a paper
 #: cites, none of which asks for one.
@@ -41,15 +41,26 @@ _UA = "Mozilla/5.0 (compatible; data-availability-pipeline/2.3) requests"
 
 #: Text that means "resolved, but there is no data here".
 _EMPTY_RECORD_MARKERS = (
-    "has been withdrawn", "has been retracted", "record not found",
-    "this item has been removed", "no files", "0 files",
-    "dataset is no longer available", "embargoed until",
-    "page not found", "does not exist", "restricted access",
+    "has been withdrawn",
+    "has been retracted",
+    "record not found",
+    "this item has been removed",
+    "no files",
+    "0 files",
+    "dataset is no longer available",
+    "embargoed until",
+    "page not found",
+    "does not exist",
+    "restricted access",
 )
 
 _AUTH_MARKERS = (
-    "sign in", "log in to continue", "institutional login",
-    "purchase access", "get access", "subscribe to view",
+    "sign in",
+    "log in to continue",
+    "institutional login",
+    "purchase access",
+    "get access",
+    "subscribe to view",
 )
 
 #: Hosts that answer an automated request with 404 whether or not the record
@@ -123,8 +134,12 @@ def _pinning_of(identifier: str) -> Pinned:
 def classify_pinning(identifiers: Iterable[str]) -> Pinned:
     """Most specific pinning across all identifiers for an axis."""
     best = Pinned.NONE
-    order = {Pinned.NONE: 0, Pinned.UNPINNED_URL: 1,
-             Pinned.DOI_VERSIONED: 2, Pinned.COMMIT_PINNED: 3}
+    order = {
+        Pinned.NONE: 0,
+        Pinned.UNPINNED_URL: 1,
+        Pinned.DOI_VERSIONED: 2,
+        Pinned.COMMIT_PINNED: 3,
+    }
     for ident in identifiers:
         p = _pinning_of(ident)
         if order[p] > order[best]:
@@ -205,8 +220,9 @@ def _space_repairs(url: str) -> list[tuple[str, tuple[str, ...]]]:
     return out
 
 
-def _repair(cfg: Config, identifier: str, url: str,
-            original: VerificationResult) -> VerificationResult:
+def _repair(
+    cfg: Config, identifier: str, url: str, original: VerificationResult
+) -> VerificationResult:
     """After a hard 404 on a path with spaces, try each `_space_repairs`
     candidate and use one only if it is the only one that exists.
 
@@ -249,51 +265,52 @@ def _repair(cfg: Config, identifier: str, url: str,
     tried = f"{len(found)} of {len(candidates)} candidates resolve"
     if len(found) == 1 and not incomplete:
         cand, fills, res = found[0]
-        how = ", ".join("space->underscore" if f else "space->nothing"
-                        for f in fills)
+        how = ", ".join("space->underscore" if f else "space->nothing" for f in fills)
         note = f"repaired: {how} ({tried})"
         if res.final_url and res.final_url != cand:
             # GitHub forwards renamed repositories; without the candidate, a
             # repair reads as a rename (`TNO-Quantum/qscore_dwave` -> `/qscore`)
             note += f", via {cand}"
-        return replace(res, final_url=res.final_url or cand,
-                       note=f"{note}; {res.note}" if res.note else note)
+        return replace(
+            res, final_url=res.final_url or cand, note=f"{note}; {res.note}" if res.note else note
+        )
     if len(found) > 1:
-        return replace(original, note=(
-            f"ambiguous repair, not picked: {tried}: "
-            + ", ".join(c for c, _, _ in found)))
+        return replace(
+            original,
+            note=(f"ambiguous repair, not picked: {tried}: " + ", ".join(c for c, _, _ in found)),
+        )
     if incomplete:
-        return replace(original, note=(
-            f"repair not established: {tried}, "
-            f"{incomplete} could not be checked"))
+        return replace(
+            original, note=(f"repair not established: {tried}, {incomplete} could not be checked")
+        )
     return original
 
 
 def verify_identifier(cfg: Config, identifier: str) -> VerificationResult:
     url = _normalise(identifier)
     if not url:
-        return VerificationResult(identifier, Actual.NOT_APPLICABLE,
-                                  note="not a resolvable identifier")
+        return VerificationResult(
+            identifier, Actual.NOT_APPLICABLE, note="not a resolvable identifier"
+        )
     return _repair(cfg, identifier, url, _check(cfg, identifier, url))
 
 
 def _check(cfg: Config, identifier: str, url: str) -> VerificationResult:
     """One fetch of `url`, reported against the paper's `identifier`."""
-    headers = {"User-Agent": _UA,
-               "Accept": "text/html,application/xhtml+xml,*/*"}
+    headers = {"User-Agent": _UA, "Accept": "text/html,application/xhtml+xml,*/*"}
     host = (urlparse(url).hostname or "").lower()
     if host in cfg.tdm_headers:
         headers.update(cfg.tdm_headers[host])
 
     try:
         LIMITER.wait(url)
-        r = requests.head(url, headers=headers, timeout=cfg.timeout,
-                          allow_redirects=True)
+        r = requests.head(url, headers=headers, timeout=cfg.timeout, allow_redirects=True)
         # Repositories frequently refuse HEAD; that is not evidence of anything.
         if r.status_code in (403, 405, 501) or r.status_code >= 500:
             LIMITER.wait(url)
-            r = requests.get(url, headers=headers, timeout=cfg.timeout,
-                             allow_redirects=True, stream=True)
+            r = requests.get(
+                url, headers=headers, timeout=cfg.timeout, allow_redirects=True, stream=True
+            )
     except requests.RequestException as e:
         return VerificationResult(identifier, Actual.ERROR, note=type(e).__name__)
 
@@ -302,9 +319,13 @@ def _check(cfg: Config, identifier: str, url: str) -> VerificationResult:
     if code == 404:
         if _soft_404(host):
             return VerificationResult(
-                identifier, Actual.ERROR, code, final,
+                identifier,
+                Actual.ERROR,
+                code,
+                final,
                 note="404 from a host that refuses automated requests "
-                     "indiscriminately; existence not established")
+                "indiscriminately; existence not established",
+            )
         return VerificationResult(identifier, Actual.NOT_FOUND, code, final)
     if code in (401, 407):
         return VerificationResult(identifier, Actual.AUTH_REQUIRED, code, final)
@@ -313,11 +334,16 @@ def _check(cfg: Config, identifier: str, url: str) -> VerificationResult:
     if code == 403:
         if _soft_403(host):
             return VerificationResult(
-                identifier, Actual.ERROR, code, final,
+                identifier,
+                Actual.ERROR,
+                code,
+                final,
                 note="403 from a host that blocks automated requests "
-                     "intermittently; access requirement not established")
-        return VerificationResult(identifier, Actual.AUTH_REQUIRED, code, final,
-                                  note="403 after GET fallback")
+                "intermittently; access requirement not established",
+            )
+        return VerificationResult(
+            identifier, Actual.AUTH_REQUIRED, code, final, note="403 after GET fallback"
+        )
     if code >= 400:
         return VerificationResult(identifier, Actual.ERROR, code, final)
 
@@ -332,11 +358,17 @@ def _check(cfg: Config, identifier: str, url: str) -> VerificationResult:
 
     if body:
         if any(m in body for m in _EMPTY_RECORD_MARKERS):
-            return VerificationResult(identifier, Actual.RESOLVES_NO_DATA, code,
-                                      final, note="landing page reports no content")
+            return VerificationResult(
+                identifier,
+                Actual.RESOLVES_NO_DATA,
+                code,
+                final,
+                note="landing page reports no content",
+            )
         if any(m in body for m in _AUTH_MARKERS) and "download" not in body:
-            return VerificationResult(identifier, Actual.PAYWALLED, code, final,
-                                      note="landing page gates access")
+            return VerificationResult(
+                identifier, Actual.PAYWALLED, code, final, note="landing page gates access"
+            )
 
     return VerificationResult(identifier, Actual.ACCESSIBLE, code, final)
 
@@ -345,9 +377,16 @@ def aggregate(results: list[VerificationResult]) -> Actual:
     """Worst-case wins: one broken link in a set makes the claim unreliable."""
     if not results:
         return Actual.NOT_ATTEMPTED
-    severity = [Actual.NOT_FOUND, Actual.RESOLVES_NO_DATA, Actual.PAYWALLED,
-                Actual.AUTH_REQUIRED, Actual.ERROR, Actual.ACCESSIBLE,
-                Actual.NOT_APPLICABLE, Actual.NOT_ATTEMPTED]
+    severity = [
+        Actual.NOT_FOUND,
+        Actual.RESOLVES_NO_DATA,
+        Actual.PAYWALLED,
+        Actual.AUTH_REQUIRED,
+        Actual.ERROR,
+        Actual.ACCESSIBLE,
+        Actual.NOT_APPLICABLE,
+        Actual.NOT_ATTEMPTED,
+    ]
     considered = [r.status for r in results if r.status is not Actual.NOT_APPLICABLE]
     if not considered:
         return Actual.NOT_APPLICABLE
@@ -379,7 +418,9 @@ def derive_case(declared_case: Case, actual: Actual) -> tuple[Case, str]:
             f"promoted from openly_accessible: verification returned {actual.value}"
         )
     if declared_case is Case.OPENLY_ACCESSIBLE and actual in (
-            Actual.PAYWALLED, Actual.AUTH_REQUIRED):
+        Actual.PAYWALLED,
+        Actual.AUTH_REQUIRED,
+    ):
         return Case.ACCESS_UNRESOLVABLE, (
             f"promoted from openly_accessible: path resolves but gates access "
             f"({actual.value}); 'openly accessible' requires access without a "
@@ -388,5 +429,10 @@ def derive_case(declared_case: Case, actual: Actual) -> tuple[Case, str]:
     return declared_case, ""
 
 
-__all__ = ["VerificationResult", "verify_identifier", "aggregate",
-           "derive_case", "classify_pinning"]
+__all__ = [
+    "VerificationResult",
+    "verify_identifier",
+    "aggregate",
+    "derive_case",
+    "classify_pinning",
+]

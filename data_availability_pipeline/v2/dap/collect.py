@@ -29,6 +29,7 @@ Output columns are what `enrol` reads (`openalex_id`, `doi`,
 `cited_by_count`, `type`. A `<out>.query.json` records the exact query, so the
 corpus can be re-drawn.
 """
+
 from __future__ import annotations
 
 import csv
@@ -44,9 +45,18 @@ from typing import Callable, Optional
 import requests
 
 OPENALEX_WORKS = "https://api.openalex.org/works"
-PER_PAGE = 200                      # OpenAlex's maximum
-COLUMNS = ["openalex_id", "doi", "title", "publication_year", "venue",
-           "is_oa", "oa_status", "cited_by_count", "type"]
+PER_PAGE = 200  # OpenAlex's maximum
+COLUMNS = [
+    "openalex_id",
+    "doi",
+    "title",
+    "publication_year",
+    "venue",
+    "is_oa",
+    "oa_status",
+    "cited_by_count",
+    "type",
+]
 SEARCH_FIELDS = ("title", "title_and_abstract", "fulltext")
 
 
@@ -71,8 +81,10 @@ class Query:
             raise ValueError(f"--search-in must be one of {SEARCH_FIELDS}")
         if "," in self.subject and self.search_in != "fulltext":
             # A comma separates OpenAlex filters, so it would split the subject.
-            raise ValueError("a subject used in a title/abstract filter may not "
-                             "contain a comma; use OR between terms instead")
+            raise ValueError(
+                "a subject used in a title/abstract filter may not "
+                "contain a comma; use OR between terms instead"
+            )
 
     def filters(self) -> list[str]:
         out = []
@@ -103,6 +115,7 @@ class Query:
 @dataclass
 class Http:
     """The one network boundary, so tests can fake it."""
+
     api_key: str = ""
     get: Callable = field(default=requests.get)
     sleep: Callable = field(default=time.sleep)
@@ -117,12 +130,13 @@ class Http:
             r = self.get(OPENALEX_WORKS, params=params, timeout=60)
             if r.status_code == 429 or r.status_code >= 500:
                 ra = r.headers.get("Retry-After")
-                wait = float(ra) if ra else float(2 ** attempt)
+                wait = float(ra) if ra else float(2**attempt)
                 if wait > self.max_wait:
                     raise QuotaExhausted(
                         f"OpenAlex asked for a {wait:.0f}s wait: the daily quota is "
                         f"spent. Rerun later (or with another OPENALEX_API_KEY); the "
-                        f"harvest resumes from the saved cursor.")
+                        f"harvest resumes from the saved cursor."
+                    )
                 self.sleep(wait)
                 continue
             r.raise_for_status()
@@ -164,20 +178,29 @@ def collect(q: Query, out: Path, http: Http, *, log=print) -> int:
     if state.exists():
         saved = json.loads(state.read_text())
         if saved.get("params") != q.params():
-            sys.exit(f"{state} belongs to a different query; delete it or use "
-                     f"another --out")
+            sys.exit(f"{state} belongs to a different query; delete it or use another --out")
         cursor = saved.get("cursor") or "*"
         log(f"resuming: {len(seen)} rows on disk")
     elif seen:
-        sys.exit(f"{out} exists with no cursor file, so it is a finished harvest "
-                 f"or another query's. Use another --out.")
+        sys.exit(
+            f"{out} exists with no cursor file, so it is a finished harvest "
+            f"or another query's. Use another --out."
+        )
 
-    Path(str(out) + ".query.json").write_text(json.dumps({
-        "subject": q.subject, "search_in": q.search_in, "year_min": q.year_min,
-        "year_max": q.year_max, "extra_filter": q.extra_filter,
-        "openalex_params": q.params(),
-        "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-    }, indent=2))
+    Path(str(out) + ".query.json").write_text(
+        json.dumps(
+            {
+                "subject": q.subject,
+                "search_in": q.search_in,
+                "year_min": q.year_min,
+                "year_max": q.year_max,
+                "extra_filter": q.extra_filter,
+                "openalex_params": q.params(),
+                "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            },
+            indent=2,
+        )
+    )
 
     new_file = not out.exists()
     with open(out, "a", newline="", encoding="utf-8") as f:
@@ -214,14 +237,19 @@ def collect(q: Query, out: Path, http: Http, *, log=print) -> int:
             state.write_text(json.dumps({"cursor": cursor, "params": q.params()}))
             http.sleep(0.1)
     if state.exists():
-        state.unlink()                  # finished: nothing left to resume
+        state.unlink()  # finished: nothing left to resume
     return len(seen)
 
 
 def cmd_collect(a) -> None:
-    q = Query(subject=a.subject, search_in=a.search_in, year_min=a.year_min,
-              year_max=a.year_max, extra_filter=a.filter or "",
-              max_papers=a.max_papers)
+    q = Query(
+        subject=a.subject,
+        search_in=a.search_in,
+        year_min=a.year_min,
+        year_max=a.year_max,
+        extra_filter=a.filter or "",
+        max_papers=a.max_papers,
+    )
     http = Http(api_key=os.environ.get("OPENALEX_API_KEY", ""))
     print(f"OpenAlex query: {json.dumps(q.params())}", file=sys.stderr)
     n = collect(q, Path(a.out), http, log=lambda m: print(m, file=sys.stderr))
@@ -231,9 +259,12 @@ def cmd_collect(a) -> None:
 def add_parser(sub) -> None:
     c = sub.add_parser("collect", help="harvest a subject's papers from OpenAlex")
     c.set_defaults(fn=cmd_collect)
-    c.add_argument("--subject", required=True,
-                   help='the field of interest, e.g. "quantum computing"; OpenAlex '
-                        'search syntax (AND, OR, NOT, "quoted phrases") works')
+    c.add_argument(
+        "--subject",
+        required=True,
+        help='the field of interest, e.g. "quantum computing"; OpenAlex '
+        'search syntax (AND, OR, NOT, "quoted phrases") works',
+    )
     c.add_argument("--search-in", choices=SEARCH_FIELDS, default="title_and_abstract")
     c.add_argument("--year-min", type=int)
     c.add_argument("--year-max", type=int)

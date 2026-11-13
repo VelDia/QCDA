@@ -10,3 +10,8 @@ data_availability_pipeline/v2/keyword_qc_papers.csv
 .pytest_cache/
 benchmark/runs/*
 .DS_Store
+# Python and tool caches
+__pycache__/
+*.pyc
+.ruff_cache/
+.venv/
