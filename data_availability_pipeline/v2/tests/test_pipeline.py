@@ -888,13 +888,22 @@ def _retrieve_with(s: Store, rows: list[dict], routes: dict) -> None:
         routes: Maps a substring of the URL to a `FakeResponse` or to an
             exception to raise (see `fake_get_factory`).
     """
-    orig = sources._get
+    orig, orig_pget = sources._get, P._get
+
+    def no_authors(cfg: Config, url: str, **kw: object) -> NoReturn:
+        raise sources.PermanentError("HTTP 404")
+
     sources._get = fake_get_factory(routes)
+    # The stage looks a paper's authors up at OpenAlex through the pipeline's
+    # own `_get`. Unless a test has already faked that lookup, answer it here,
+    # so no test reaches the network.
+    if P._get is orig:
+        P._get = no_authors
     try:
         for row in rows:
             P.stage_retrieve_one(CFG, s, row, metadata_only=False, pool=None)
     finally:
-        sources._get = orig
+        sources._get, P._get = orig, orig_pget
 
 
 def _row(s: Store, stage: str, suffix: str) -> dict:

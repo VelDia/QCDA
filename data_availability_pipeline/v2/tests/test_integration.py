@@ -3154,12 +3154,17 @@ def test_a_local_pdf_that_is_not_the_article_is_refused(tmp_path: Path) -> None:
         _pdf_bytes("Download citation. Google Scholar. Access options.")
     )
     cfg = Config(contact_email="researcher@institution.edu", pdf_dir=str(tmp_path))
-    ft = sources.retrieve_full_text(
-        cfg,
-        work={"best_oa_location": {}, "locations": [], "ids": {}},
-        doi="10.1088/x.y",
-        title="Transmon readout fidelity",
-        facts=CrossrefFacts(found=True),
+    # With the local file refused the cascade goes on to Unpaywall. Answer that
+    # lookup here, so the test never reaches the network: an unrouted URL fails.
+    ft = _with_get(
+        {"api.unpaywall.org": sources.PermanentError("HTTP 404")},
+        lambda: sources.retrieve_full_text(
+            cfg,
+            work={"best_oa_location": {}, "locations": [], "ids": {}},
+            doi="10.1088/x.y",
+            title="Transmon readout fidelity",
+            facts=CrossrefFacts(found=True),
+        ),
     )
     assert not ft.ok, "a local file still has to look like the article"
 
