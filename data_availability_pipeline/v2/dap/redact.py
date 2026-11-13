@@ -11,6 +11,7 @@ appears in a string. It is applied where errors are built (`sources._get`) and
 again where they are stored (`Store.fail`), so a new call site cannot reintroduce
 the leak by forgetting one of them.
 """
+
 from __future__ import annotations
 
 import re
@@ -18,11 +19,21 @@ import re
 MASK = "<redacted>"
 
 _PARAM = re.compile(
-    r"(?i)\b(email|mailto|api_key|apikey|api-key|access_token|token)=([^&\s'\"<>()]+)")
+    r"(?i)\b(email|mailto|api_key|apikey|api-key|access_token|token)=([^&\s'\"<>()]+)"
+)
 _MAILTO = re.compile(r"(?i)\bmailto:[^\s'\"<>();]+")
 
 
 def redact(text: object) -> str:
-    """`text` as a string, with credential values replaced by MASK."""
+    """Replace credential values in a piece of text with `MASK`.
+
+    Args:
+        text: The text to clean, typically an error message or a URL. Any
+            object is accepted and converted with `str`.
+
+    Returns:
+        The text with the value of every credential-like query parameter and
+        every `mailto:` address replaced by `MASK`.
+    """
     s = _PARAM.sub(lambda m: f"{m.group(1)}={MASK}", str(text))
     return _MAILTO.sub(f"mailto:{MASK}", s)

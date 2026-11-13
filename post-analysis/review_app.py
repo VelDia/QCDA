@@ -15,6 +15,7 @@ Case tokens, numbers and confidence tokens are imported from dap/schema.py, so
 the form cannot offer or store a value the scheme does not have. The
 classifier's own codes are never sent to the page: the review stays blind.
 """
+
 import argparse
 import csv
 import json
@@ -33,9 +34,13 @@ sys.path.insert(0, str(HERE.parent / "data_availability_pipeline" / "v2"))
 from dap.schema import CASE_LABEL, CASE_NUMBER, Case, Confidence  # noqa: E402
 
 NEW_COLS = [
-    "human_review_a_case", "human_review_a_case_num",
-    "human_review_b_case", "human_review_b_case_num",
-    "human_review_confidence", "human_review_evidence", "human_review_notes",
+    "human_review_a_case",
+    "human_review_a_case_num",
+    "human_review_b_case",
+    "human_review_b_case_num",
+    "human_review_confidence",
+    "human_review_evidence",
+    "human_review_notes",
     "human_review_at",
 ]
 
@@ -44,31 +49,44 @@ NEW_COLS = [
 CASE_HINT = {
     Case.NOT_APPLICABLE: "The axis does not apply: no external data analysed (A) / nothing generated (B)",
     Case.OPENLY_ACCESSIBLE: "A concrete identifier — DOI, URL, accession, repository",
-    Case.ACCESS_NOT_PROVIDED: "Identifiable (e.g. \"we use ImageNet\") but no path given",
-    Case.INSUFFICIENTLY_SPECIFIED: "Cannot even identify the material (\"an internal corpus\")",
+    Case.ACCESS_NOT_PROVIDED: 'Identifiable (e.g. "we use ImageNet") but no path given',
+    Case.INSUFFICIENTLY_SPECIFIED: 'Cannot even identify the material ("an internal corpus")',
     Case.ACCESS_UNRESOLVABLE: "A specific path is given, and it fails",
     Case.ON_REQUEST: "Offered on contact, however hedged",
     Case.EXPLICITLY_RESTRICTED: "Stated that it cannot be shared",
 }
 
-CASES = [{"token": c.value, "num": CASE_NUMBER[c], "label": CASE_LABEL[c],
-          "hint": CASE_HINT[c]} for c in Case]
+CASES = [
+    {"token": c.value, "num": CASE_NUMBER[c], "label": CASE_LABEL[c], "hint": CASE_HINT[c]}
+    for c in Case
+]
 CONFIDENCES = [c.value for c in Confidence]
 
 
 def load_copies(db: Path, ids: list[str]) -> dict[str, dict]:
-    """Where each paper can be read, and the passages the pipeline stored.
+    """Find where each paper can be read, and the passages the pipeline stored.
 
     Opened read-only: SQLite is the pipeline's state and this app never writes
     it. Only meta_json is read -- record_json holds the classifier's codes and
-    rationale, and the page must not see them."""
+    rationale, and the page must not see them.
+
+    Args:
+        db: The pipeline database. A missing file gives an empty result.
+        ids: The OpenAlex ids of the papers under review.
+
+    Returns:
+        For each id found, a dict with `links` (the copies of the paper:
+        `name`, `url`, whether it is a PDF, and whether it is the copy the
+        pipeline read), `text_source`, and `passages` (`keywords` and `text`).
+    """
     if not db.exists():
         return {}
     con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     q = ",".join("?" * len(ids))
     out = {}
     for oid, meta in con.execute(
-            f"SELECT openalex_id, meta_json FROM papers WHERE openalex_id IN ({q})", ids):
+        f"SELECT openalex_id, meta_json FROM papers WHERE openalex_id IN ({q})", ids
+    ):
         m = json.loads(meta or "{}")
         read_url = m.get("text_url") or ""
         links, seen = [], set()
@@ -77,24 +95,60 @@ def load_copies(db: Path, ids: list[str]) -> dict[str, dict]:
             if not url or url in seen:
                 continue
             seen.add(url)
-            links.append({"name": (loc.get("source") or {}).get("display_name") or "copy",
-                          "url": url, "pdf": bool(loc.get("pdf_url")),
-                          "read": url == read_url})
+            links.append(
+                {
+                    "name": (loc.get("source") or {}).get("display_name") or "copy",
+                    "url": url,
+                    "pdf": bool(loc.get("pdf_url")),
+                    "read": url == read_url,
+                }
+            )
         if read_url and read_url not in seen:
-            links.append({"name": "pipeline's copy", "url": read_url,
-                          "pdf": read_url.endswith(".pdf"), "read": True})
+            links.append(
+                {
+                    "name": "pipeline's copy",
+                    "url": read_url,
+                    "pdf": read_url.endswith(".pdf"),
+                    "read": True,
+                }
+            )
         out[oid] = {
             "links": links,
             "text_source": m.get("text_source") or "",
-            "passages": [{"keywords": p.get("keywords") or [], "text": p.get("text") or ""}
-                         for p in m.get("passages") or []],
+            "passages": [
+                {"keywords": p.get("keywords") or [], "text": p.get("text") or ""}
+                for p in m.get("passages") or []
+            ],
         }
     con.close()
     return out
 
 
 class Store:
-    def __init__(self, path: Path, db: Path):
+    """The review CSV, held in memory and written back on every save.
+
+    A one-time copy of the original file is kept beside it as `<csv>.bak`.
+
+    Attributes:
+        path: The CSV file under review.
+        lock: Serialises saves from the server's request threads.
+        fields: The CSV columns, with the human-review columns appended.
+        rows: The CSV rows, one dict per paper.
+        copies: Reading links and stored passages by OpenAlex id (see
+            `load_copies`).
+    """
+
+    def __init__(self, path: Path, db: Path) -> None:
+        """Load the CSV, back it up once and read the papers' copies.
+
+        Args:
+            path: The CSV file under review.
+            db: The pipeline database to read copies and passages from. It is
+                opened read-only and may be missing.
+
+        Raises:
+            SystemExit: If `openalex_id` is not unique in the CSV.
+        """
         self.path = path
         self.lock = threading.Lock()
         backup = path.with_suffix(path.suffix + ".bak")
@@ -106,7 +160,13 @@ class Store:
             raise SystemExit("openalex_id is not unique in the CSV; refusing to start")
         self.copies = load_copies(db, ids)
 
-    def _read(self):
+    def _read(self) -> tuple[list[str], list[dict]]:
+        """Read the CSV and add the human-review columns it lacks.
+
+        Returns:
+            A tuple `(fields, rows)`: the column names, and one dict per row with
+            every human-review column present (empty where not yet filled).
+        """
         with open(self.path, newline="", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             fields = list(reader.fieldnames)
@@ -119,7 +179,8 @@ class Store:
                 r.setdefault(col, "")
         return fields, rows
 
-    def _write(self):
+    def _write(self) -> None:
+        """Write every row back to the CSV atomically, through a temporary file."""
         tmp = self.path.with_suffix(self.path.suffix + ".tmp")
         with open(tmp, "w", newline="", encoding="utf-8") as f:
             w = csv.DictWriter(f, fieldnames=self.fields, lineterminator="\n")
@@ -127,18 +188,44 @@ class Store:
             w.writerows(self.rows)
         os.replace(tmp, self.path)
 
-    def public_rows(self):
+    def public_rows(self) -> list[dict]:
+        """List the rows as the page may see them.
+
+        Returns:
+            One dict per paper with its identity, status, whether it has been
+            classified, and the human-review columns. The classifier's codes are
+            left out, so the review stays blind.
+        """
         out = []
         for r in self.rows:
-            out.append({
-                "id": r["openalex_id"], "doi": r["doi"], "title": r["title"],
-                "year": r["year"], "arm": r["arm"], "status": r["status"],
-                "classified": bool(r["a_case"] or r["b_case"]),
-                **{c: r[c] for c in NEW_COLS},
-            })
+            out.append(
+                {
+                    "id": r["openalex_id"],
+                    "doi": r["doi"],
+                    "title": r["title"],
+                    "year": r["year"],
+                    "arm": r["arm"],
+                    "status": r["status"],
+                    "classified": bool(r["a_case"] or r["b_case"]),
+                    **{c: r[c] for c in NEW_COLS},
+                }
+            )
         return out
 
-    def save(self, payload: dict):
+    def save(self, payload: dict) -> dict:
+        """Validate one review and write it to the CSV.
+
+        Args:
+            payload: The form's answer: `id` (the paper's OpenAlex id), `a_case`,
+                `b_case`, `confidence`, and optionally `evidence` and `notes`.
+
+        Returns:
+            The human-review columns as stored for that paper.
+
+        Raises:
+            ValueError: If a case or the confidence is not a token of the scheme,
+                or if `id` is not in the CSV.
+        """
         tokens = {c.value: c for c in Case}
         a, b = payload.get("a_case"), payload.get("b_case")
         conf = payload.get("confidence")
@@ -150,23 +237,43 @@ class Store:
             row = next((r for r in self.rows if r["openalex_id"] == payload.get("id")), None)
             if row is None:
                 raise ValueError("unknown openalex_id")
-            row.update({
-                "human_review_a_case": a,
-                "human_review_a_case_num": str(CASE_NUMBER[tokens[a]]),
-                "human_review_b_case": b,
-                "human_review_b_case_num": str(CASE_NUMBER[tokens[b]]),
-                "human_review_confidence": conf,
-                "human_review_evidence": (payload.get("evidence") or "").strip(),
-                "human_review_notes": (payload.get("notes") or "").strip(),
-                "human_review_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            })
+            row.update(
+                {
+                    "human_review_a_case": a,
+                    "human_review_a_case_num": str(CASE_NUMBER[tokens[a]]),
+                    "human_review_b_case": b,
+                    "human_review_b_case_num": str(CASE_NUMBER[tokens[b]]),
+                    "human_review_confidence": conf,
+                    "human_review_evidence": (payload.get("evidence") or "").strip(),
+                    "human_review_notes": (payload.get("notes") or "").strip(),
+                    "human_review_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                }
+            )
             self._write()
             return {c: row[c] for c in NEW_COLS}
 
 
-def make_handler(store: Store):
+def make_handler(store: Store) -> type[BaseHTTPRequestHandler]:
+    """Build the HTTP request handler class for one review store.
+
+    Args:
+        store: The review the handler serves and saves to.
+
+    Returns:
+        A `BaseHTTPRequestHandler` subclass bound to `store`.
+    """
+
     class Handler(BaseHTTPRequestHandler):
-        def _send(self, code, body, ctype="application/json"):
+        """Serves the review page and its JSON API."""
+
+        def _send(self, code: int, body: str | bytes, ctype: str = "application/json") -> None:
+            """Send a complete response.
+
+            Args:
+                code: The HTTP status code.
+                body: The response body; text is encoded as UTF-8.
+                ctype: The media type, without the charset.
+            """
             data = body.encode("utf-8") if isinstance(body, str) else body
             self.send_response(code)
             self.send_header("Content-Type", ctype + "; charset=utf-8")
@@ -175,20 +282,30 @@ def make_handler(store: Store):
             self.end_headers()
             self.wfile.write(data)
 
-        def do_GET(self):
+        def do_GET(self) -> None:
+            """Serve the page, the row list, or one paper's copies and passages."""
             if self.path == "/":
                 self._send(200, PAGE, "text/html")
             elif self.path.startswith("/api/paper?"):
                 oid = parse_qs(urlsplit(self.path).query).get("id", [""])[0]
                 self._send(200, json.dumps(store.copies.get(oid, {"links": [], "passages": []})))
             elif self.path == "/api/rows":
-                self._send(200, json.dumps({"rows": store.public_rows(), "cases": CASES,
-                                            "confidences": CONFIDENCES,
-                                            "csv": str(store.path)}))
+                self._send(
+                    200,
+                    json.dumps(
+                        {
+                            "rows": store.public_rows(),
+                            "cases": CASES,
+                            "confidences": CONFIDENCES,
+                            "csv": str(store.path),
+                        }
+                    ),
+                )
             else:
                 self._send(404, json.dumps({"error": "not found"}))
 
-        def do_POST(self):
+        def do_POST(self) -> None:
+            """Save one review; an invalid one is answered with 400 and the reason."""
             if self.path != "/api/save":
                 return self._send(404, json.dumps({"error": "not found"}))
             try:
@@ -198,7 +315,13 @@ def make_handler(store: Store):
                 return self._send(400, json.dumps({"error": str(e)}))
             self._send(200, json.dumps({"saved": saved}))
 
-        def log_message(self, fmt, *args):
+        def log_message(self, fmt: str, *args: object) -> None:
+            """Log saves only, to stderr; page and API reads are not logged.
+
+            Args:
+                fmt: The format string, as `BaseHTTPRequestHandler` passes it.
+                *args: The values for `fmt`.
+            """
             if self.command == "POST":
                 sys.stderr.write("%s\n" % (fmt % args))
 
@@ -454,17 +577,27 @@ load();
 </script></body></html>"""
 
 
-def main():
+def main() -> None:
+    """Start the review server on 127.0.0.1 and serve until interrupted.
+
+    Reads the command line: the CSV to review, `--port` and `--db`.
+    """
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("csv", nargs="?", default=str(HERE / "human_review.csv"))
     ap.add_argument("--port", type=int, default=8765)
-    ap.add_argument("--db", default=str(HERE.parent / "dap_final.sqlite"),
-                    help="pipeline database to read copies and passages from (read-only)")
+    ap.add_argument(
+        "--db",
+        default=str(HERE.parent / "dap_final.sqlite"),
+        help="pipeline database to read copies and passages from (read-only)",
+    )
     args = ap.parse_args()
     store = Store(Path(args.csv).resolve(), Path(args.db).resolve())
     print(f"copies/passages for {len(store.copies)} rows from {args.db}", flush=True)
     srv = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(store))
-    print(f"reviewing {store.path} ({len(store.rows)} rows) at http://127.0.0.1:{args.port}", flush=True)
+    print(
+        f"reviewing {store.path} ({len(store.rows)} rows) at http://127.0.0.1:{args.port}",
+        flush=True,
+    )
     srv.serve_forever()
 
 

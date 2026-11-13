@@ -1,5 +1,4 @@
-"""
-dap.store — durable state in SQLite instead of append-only CSV.
+"""dap.store — durable state in SQLite instead of append-only CSV.
 
 v1 resumed by reading analysis.csv with pandas inside a bare `except` that
 returned an empty set on any failure. One malformed row — an unescaped newline
@@ -16,6 +15,7 @@ permanently, stop trying" explicit instead of inferred.
 CSV is still what you analyse in — `export_csv()` writes it on demand — but it
 is a view of the database, never the source of truth.
 """
+
 from __future__ import annotations
 
 import csv
@@ -26,10 +26,14 @@ import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Iterator, Optional
+from typing import TYPE_CHECKING, Iterable, Iterator, Optional
 
 from .redact import redact
-from .schema import FLAT_COLUMNS, PaperRecord, SCHEME_VERSION
+from .schema import FLAT_COLUMNS, SCHEME_VERSION, PaperRecord
+
+if TYPE_CHECKING:
+    from .classify import Usage
+    from .verify import VerificationResult
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS papers (
@@ -128,8 +132,17 @@ MAX_ATTEMPTS = 3
 #: of these is a preprint or self-deposit record even when it carries no DOI of
 #: its own -- and a row with no DOI is exactly what the prefix test cannot see.
 PREPRINT_VENUE_PREFIXES: tuple[str, ...] = (
-    "arXiv", "Zenodo", "Research Square", "SSRN", "Preprints.org",
-    "bioRxiv", "medRxiv", "TechRxiv", "OSF", "Figshare", "ChemRxiv",
+    "arXiv",
+    "Zenodo",
+    "Research Square",
+    "SSRN",
+    "Preprints.org",
+    "bioRxiv",
+    "medRxiv",
+    "TechRxiv",
+    "OSF",
+    "Figshare",
+    "ChemRxiv",
 )
 
 #: Repository and platform names that appear anywhere in a venue string rather
@@ -140,40 +153,63 @@ PREPRINT_VENUE_PREFIXES: tuple[str, ...] = (
 #: coded, and 140 rows in the classify queue. No journal in this corpus carries
 #: "Repository", "Theses" or "Dissertation" in its title.
 PREPRINT_VENUE_SUBSTRINGS: tuple[str, ...] = (
-    "Repository", "repository", "ResearchData", "Dataverse", "DSpace",
-    "EPrints", "Qeios", "eScholarship", "Publication Server", "Institutional",
-    "Theses", "Dissertation", "Research Portal", "Open Research",
-    "Strathprints", "Publikationsportal", "Open Portal",
+    "Repository",
+    "repository",
+    "ResearchData",
+    "Dataverse",
+    "DSpace",
+    "EPrints",
+    "Qeios",
+    "eScholarship",
+    "Publication Server",
+    "Institutional",
+    "Theses",
+    "Dissertation",
+    "Research Portal",
+    "Open Research",
+    "Strathprints",
+    "Publikationsportal",
+    "Open Portal",
 )
 
 PREPRINT_DOI_PREFIXES: tuple[str, ...] = (
-    "10.48550/",   # arXiv
-    "10.5281/",    # Zenodo
-    "10.21203/",   # Research Square
-    "10.2139/",    # SSRN
-    "10.20944/",   # Preprints.org
-    "10.6084/",    # figshare, incl. the `m9.figshare.c.` collection records
-    "10.60893/",   # publisher-run figshare (AIP and others), supplementary only
+    "10.48550/",  # arXiv
+    "10.5281/",  # Zenodo
+    "10.21203/",  # Research Square
+    "10.2139/",  # SSRN
+    "10.20944/",  # Preprints.org
+    "10.6084/",  # figshare, incl. the `m9.figshare.c.` collection records
+    "10.60893/",  # publisher-run figshare (AIP and others), supplementary only
     # Added 3 Oct (S100) after batch 108 exported `W4413166857`, an engrXiv
     # preprint with an empty venue string, so neither the prefix nor the venue
     # test fired. Measured on dap_frame at the time: 273 queued rows carry one
     # of these seven prefixes and the venue test would already have caught only
     # 83 of them. Five rows were coded before the fix and are not changed by it
     # -- `--publisher-doi-only` is a scope on the claim, not an exclusion.
-    "10.36227/",   # TechRxiv            (125 queued)
-    "10.26434/",   # ChemRxiv             (73)
-    "10.31219/",   # OSF Preprints        (28)
-    "10.22541/",   # Authorea             (21)
-    "10.1101/",    # bioRxiv and medRxiv  (10)
-    "10.31224/",   # engrXiv               (9)
-    "10.31234/",   # PsyArXiv              (7)
+    "10.36227/",  # TechRxiv            (125 queued)
+    "10.26434/",  # ChemRxiv             (73)
+    "10.31219/",  # OSF Preprints        (28)
+    "10.22541/",  # Authorea             (21)
+    "10.1101/",  # bioRxiv and medRxiv  (10)
+    "10.31224/",  # engrXiv               (9)
+    "10.31234/",  # PsyArXiv              (7)
 )
 
 
 def _scheme_family(version: Optional[str]) -> object:
-    """The part of a scheme_version that must match for rows to pool: major and
-    minor. Patch versions mark rulings on the same vocabulary (Diana, 28 Oct).
-    Anything that is not dotted numbers, NULL included, is its own family."""
+    """Return the part of a scheme version that must match for rows to pool.
+
+    That part is the major and minor numbers. Patch versions mark rulings on
+    the same vocabulary (Diana, 28 Oct). Anything that is not dotted numbers,
+    NULL included, is its own family.
+
+    Args:
+        version: A `scheme_version` value as stored, or None.
+
+    Returns:
+        A `(major, minor)` tuple for a version of three dotted numbers,
+        otherwise `version` itself.
+    """
     parts = (version or "").split(".")
     if len(parts) == 3 and all(p.isdigit() for p in parts):
         return tuple(int(p) for p in parts[:2])
@@ -181,7 +217,29 @@ def _scheme_family(version: Optional[str]) -> object:
 
 
 class Store:
-    def __init__(self, path: str | Path):
+    """The pipeline's state: one SQLite database, safe to share across threads.
+
+    Each thread gets its own connection, opened on first use. Methods that
+    change a paper's standing by hand (the `requeue_*` family, `exclude`,
+    `adjudicate`, `adopt`) return an empty string on success and the reason
+    for a refusal otherwise, and log what they did to the `failures` table.
+
+    Attributes:
+        path: The path of the database file.
+        STAGES: The stages a paper moves through, in order.
+        RETRIEVAL_KEYS: The `meta_json` keys the retrieve stage adds, which a
+            requeue strips.
+        REMOVED: The statuses that take a paper out of the corpus while
+            keeping its row.
+    """
+
+    def __init__(self, path: str | Path) -> None:
+        """Open the database, creating or upgrading its tables as needed.
+
+        Args:
+            path: The path of the SQLite file. It is created if it does not
+                exist.
+        """
         self.path = str(path)
         self._local = threading.local()
         with self._conn() as c:
@@ -213,22 +271,45 @@ class Store:
         A database that already holds duplicates gets a warning and no index,
         not an exception: refusing to open it would leave the operator unable to
         run the `exclude` that fixes it.
+
+        Args:
+            c: An open connection to the database.
         """
         try:
-            c.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_papers_live_doi "
-                      "ON papers(doi) WHERE doi IS NOT NULL AND doi != '' "
-                      "AND status != 'excluded'")
+            c.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_papers_live_doi "
+                "ON papers(doi) WHERE doi IS NOT NULL AND doi != '' "
+                "AND status != 'excluded'"
+            )
         except sqlite3.IntegrityError:
-            dups = [r["doi"] for r in c.execute(
-                "SELECT doi FROM papers WHERE doi IS NOT NULL AND doi != '' "
-                "AND status != 'excluded' GROUP BY doi HAVING COUNT(*) > 1 LIMIT 5")]
-            print(f"warning: {len(dups)}+ DOIs are held by more than one live row, "
-                  f"so the uniqueness index was not created. First: "
-                  f"{', '.join(dups)}. Resolve with `exclude` and reopen.",
-                  file=sys.stderr)
+            dups = [
+                r["doi"]
+                for r in c.execute(
+                    "SELECT doi FROM papers WHERE doi IS NOT NULL AND doi != '' "
+                    "AND status != 'excluded' GROUP BY doi HAVING COUNT(*) > 1 LIMIT 5"
+                )
+            ]
+            print(
+                f"warning: {len(dups)}+ DOIs are held by more than one live row, "
+                f"so the uniqueness index was not created. First: "
+                f"{', '.join(dups)}. Resolve with `exclude` and reopen.",
+                file=sys.stderr,
+            )
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
+        """Provide this thread's connection, rolling back on an exception.
+
+        The connection is opened on first use, in autocommit mode with WAL
+        journalling, and reused for the life of the thread.
+
+        Yields:
+            The thread's `sqlite3.Connection`, with `sqlite3.Row` rows.
+
+        Raises:
+            Exception: Whatever the caller's block raised, re-raised after any
+                open transaction has been rolled back.
+        """
         conn = getattr(self._local, "conn", None)
         if conn is None:
             conn = sqlite3.connect(self.path, timeout=60, isolation_level=None)
@@ -253,11 +334,19 @@ class Store:
 
     # -- enrolment ---------------------------------------------------------
     def enrol(self, rows: Iterable[dict]) -> int:
-        """Add corpus rows as `pending`. Idempotent — re-running never duplicates.
+        """Add corpus rows as `pending`. Idempotent: re-running never duplicates.
 
         A row may carry the harvest's `year`. Storing it lets the batch window
         skip an old paper before the metadata stage spends requests on it; the
         metadata stage still overwrites it with OpenAlex's year.
+
+        Args:
+            rows: The papers to add. Each needs `openalex_id` and may carry
+                `doi`, `arm` and `year`.
+
+        Returns:
+            The number of rows actually inserted; rows already enrolled are not
+            counted.
         """
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         n = 0
@@ -269,17 +358,33 @@ class Store:
                     "INSERT OR IGNORE INTO papers "
                     "(openalex_id, doi, status, arm, updated_at, year) "
                     "VALUES (?,?,'pending',?,?,?)",
-                    (r["openalex_id"], r.get("doi", ""), r.get("arm", ""), now,
-                     int(y) if y is not None else None),
+                    (
+                        r["openalex_id"],
+                        r.get("doi", ""),
+                        r.get("arm", ""),
+                        now,
+                        int(y) if y is not None else None,
+                    ),
                 )
                 n += cur.rowcount
             c.execute("COMMIT")
         return n
 
-    def pending(self, limit: Optional[int] = None,
-                arm: Optional[str] = None) -> list[dict]:
-        q = ("SELECT openalex_id, doi, arm, attempts FROM papers "
-             "WHERE status IN ('pending','failed') AND attempts < ?")
+    def pending(self, limit: Optional[int] = None, arm: Optional[str] = None) -> list[dict]:
+        """List the papers that are pending, or failed with attempts left.
+
+        Args:
+            limit: The most papers to return, or None for all of them.
+            arm: Restrict the list to one study arm, or None for every arm.
+
+        Returns:
+            One dict per paper with `openalex_id`, `doi`, `arm` and `attempts`,
+            fewest attempts first.
+        """
+        q = (
+            "SELECT openalex_id, doi, arm, attempts FROM papers "
+            "WHERE status IN ('pending','failed') AND attempts < ?"
+        )
         args: list = [MAX_ATTEMPTS]
         if arm:
             q += " AND arm = ?"
@@ -291,7 +396,18 @@ class Store:
             return [dict(r) for r in c.execute(q, args)]
 
     # -- results -----------------------------------------------------------
-    def save(self, rec: PaperRecord, verifications: list = ()) -> None:
+    def save(
+        self, rec: PaperRecord, verifications: Iterable[tuple[str, VerificationResult]] = ()
+    ) -> None:
+        """Store a finished record with its evidence and verification results.
+
+        The paper's status becomes `done` and its evidence rows are replaced.
+
+        Args:
+            rec: The validated record.
+            verifications: The verification results as `(axis, result)` pairs,
+                where `axis` is `"axis_a"` or `"axis_b"`.
+        """
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         flat = rec.flat()
         with self._conn() as c:
@@ -299,53 +415,100 @@ class Store:
             c.execute(
                 "UPDATE papers SET status='done', scheme_version=?, arm=?, "
                 "record_json=?, last_error=NULL, updated_at=? WHERE openalex_id=?",
-                (rec.scheme_version, rec.arm.value, json.dumps(flat), now,
-                 rec.openalex_id),
+                (rec.scheme_version, rec.arm.value, json.dumps(flat), now, rec.openalex_id),
             )
             c.execute("DELETE FROM evidence WHERE openalex_id=?", (rec.openalex_id,))
             c.executemany(
                 "INSERT INTO evidence VALUES (?,?,?,?,?,?)",
-                [(rec.openalex_id, e.id, e.quote, e.section, e.locator, e.source)
-                 for e in rec.evidence],
+                [
+                    (rec.openalex_id, e.id, e.quote, e.section, e.locator, e.source)
+                    for e in rec.evidence
+                ],
             )
             for axis, vr in verifications:
                 c.execute(
                     "INSERT OR REPLACE INTO verifications VALUES (?,?,?,?,?,?,?,?)",
-                    (rec.openalex_id, axis, vr.identifier, vr.status.value,
-                     vr.http_status, vr.final_url, vr.note, now),
+                    (
+                        rec.openalex_id,
+                        axis,
+                        vr.identifier,
+                        vr.status.value,
+                        vr.http_status,
+                        vr.final_url,
+                        vr.note,
+                        now,
+                    ),
                 )
             c.execute("COMMIT")
 
-    def fail(self, openalex_id: str, stage: str, error_type: str,
-             message: str, *, permanent: bool = False) -> None:
+    def fail(
+        self,
+        openalex_id: str,
+        stage: str,
+        error_type: str,
+        message: str,
+        *,
+        permanent: bool = False,
+    ) -> None:
+        """Record a failure and count an attempt against the paper.
+
+        The message is redacted before it is stored, so no contact address or
+        key reaches the database.
+
+        Args:
+            openalex_id: The paper that failed.
+            stage: The stage it failed at.
+            error_type: A short name for the kind of failure.
+            message: The error text; stored redacted and cut to 2,000 characters.
+            permanent: Whether to park the paper as `dead` rather than `failed`,
+                so it is not retried.
+        """
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         with self._conn() as c:
             c.execute("BEGIN")
-            c.execute("INSERT INTO failures (openalex_id, stage, error_type, message, at) "
-                      "VALUES (?,?,?,?,?)",
-                      (openalex_id, stage, error_type, redact(message)[:2000], now))
+            c.execute(
+                "INSERT INTO failures (openalex_id, stage, error_type, message, at) "
+                "VALUES (?,?,?,?,?)",
+                (openalex_id, stage, error_type, redact(message)[:2000], now),
+            )
             c.execute(
                 "UPDATE papers SET status=?, attempts=attempts+1, last_error=?, "
                 "updated_at=? WHERE openalex_id=?",
-                ("dead" if permanent else "failed", f"{stage}:{error_type}", now,
-                 openalex_id),
+                ("dead" if permanent else "failed", f"{stage}:{error_type}", now, openalex_id),
             )
             c.execute("COMMIT")
 
-    def record_usage(self, openalex_id: str, usage, *, discount: float = 1.0) -> None:
-        """`discount` is 0.5 for work billed through the Message Batches API, so
-        the running cost meter reflects what is actually spent rather than the
-        synchronous list price."""
+    def record_usage(self, openalex_id: str, usage: Usage, *, discount: float = 1.0) -> None:
+        """Record the token use and cost of one model call.
+
+        Args:
+            openalex_id: The paper the call was made for.
+            usage: The model and token counts of the call.
+            discount: The factor applied to the list price. It is 0.5 for work
+                billed through the Message Batches API, so the running cost
+                meter reflects what is actually spent rather than the
+                synchronous list price.
+        """
         with self._conn() as c:
             c.execute(
                 "INSERT INTO usage (openalex_id, model, input_tokens, output_tokens, "
                 "cost_usd, at) VALUES (?,?,?,?,?,?)",
-                (openalex_id, usage.model, usage.input_tokens, usage.output_tokens,
-                 usage.cost_usd * discount,
-                 datetime.now(timezone.utc).isoformat(timespec="seconds")),
+                (
+                    openalex_id,
+                    usage.model,
+                    usage.input_tokens,
+                    usage.output_tokens,
+                    usage.cost_usd * discount,
+                    datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                ),
             )
 
     def total_cost(self) -> float:
+        """Sum the cost of every recorded model call.
+
+        Returns:
+            The total in USD.
+        """
         with self._conn() as c:
             row = c.execute("SELECT COALESCE(SUM(cost_usd),0) AS t FROM usage").fetchone()
             return float(row["t"])
@@ -354,41 +517,70 @@ class Store:
     #: Papers move forward only. A stage runner claims work at its input stage
     #: and advances it; a crash anywhere leaves the paper at its last completed
     #: stage, so re-running the same command resumes rather than restarts.
-    STAGES = ["enrolled", "metadata", "retrieved", "classify_queued",
-              "classified", "verified", "done"]
+    STAGES = [
+        "enrolled",
+        "metadata",
+        "retrieved",
+        "classify_queued",
+        "classified",
+        "verified",
+        "done",
+    ]
 
     def backfill_years(self) -> int:
         """Fill `year` from meta_json for rows written before the column existed.
 
         Read-only with respect to everything else: it touches one column, only
         where it is NULL, and only from a value already stored in that same row.
+
+        Returns:
+            The number of rows whose year was filled in.
         """
         with self._conn() as c:
             cur = c.execute(
                 "UPDATE papers SET year = CAST(json_extract(meta_json, '$.year') AS INTEGER) "
                 "WHERE year IS NULL AND meta_json IS NOT NULL "
-                "AND json_extract(meta_json, '$.year') IS NOT NULL")
+                "AND json_extract(meta_json, '$.year') IS NOT NULL"
+            )
             return cur.rowcount or 0
 
-    def years(self, *, stage: Optional[str] = None,
-              coded_only: bool = False) -> dict[Optional[int], int]:
-        """Publication year histogram. `coded_only` counts only papers that
-        carry a classification, which is what "reviewed papers" means."""
+    def years(
+        self, *, stage: Optional[str] = None, coded_only: bool = False
+    ) -> dict[Optional[int], int]:
+        """Count papers by publication year.
+
+        Args:
+            stage: Count only papers at this stage, or None for every stage.
+            coded_only: Count only papers that carry a classification, which is
+                what "reviewed papers" means.
+
+        Returns:
+            The number of papers per year, newest first. The key None counts
+            papers whose year is not known.
+        """
         q = "SELECT year, COUNT(*) AS n FROM papers WHERE 1=1"
         args: list = []
         if stage:
-            q += " AND stage = ?"; args.append(stage)
+            q += " AND stage = ?"
+            args.append(stage)
         if coded_only:
             q += " AND record_json IS NOT NULL"
         q += " GROUP BY year ORDER BY year IS NULL, year DESC"
         with self._conn() as c:
             return {r["year"]: r["n"] for r in c.execute(q, args)}
 
-    def claim(self, stage: str, limit: int, arm: Optional[str] = None, *,
-              year_min: Optional[int] = None, newest_first: bool = False,
-              publisher_doi_only: bool = False,
-              skip_coded_dois: bool = False) -> list[dict]:
-        """Papers sitting at `stage` and still workable.
+    def claim(
+        self,
+        stage: str,
+        limit: int,
+        arm: Optional[str] = None,
+        *,
+        year_min: Optional[int] = None,
+        newest_first: bool = False,
+        publisher_doi_only: bool = False,
+        skip_coded_dois: bool = False,
+    ) -> list[dict]:
+        """List the papers sitting at a stage that are still workable.
 
         `year_min` drops papers published before it. A paper whose year is not
         yet known is KEPT, not dropped: the year arrives with the metadata
@@ -410,30 +602,56 @@ class Store:
         `is_classified` keys on the id, so without this the same paper is coded
         twice under two ids. Measured on dap_frame: 259 publisher DOIs are held
         by two rows, and 74 of those have one copy coded and one still queued.
+
+        Args:
+            stage: The stage to claim work from.
+            limit: The most papers to return.
+            arm: Restrict the claim to one study arm, or None for every arm.
+            year_min: Drop papers published before this year. A paper whose year
+                is not yet known is kept.
+            newest_first: Whether to order by publication year, newest first,
+                before the number of attempts.
+            publisher_doi_only: Whether to drop preprint and repository records.
+            skip_coded_dois: Whether to drop rows whose DOI is already carried by
+                a finished paper.
+
+        Returns:
+            One dict per paper with `openalex_id`, `doi`, `arm`, `attempts` and
+            `meta` (the stored metadata, decoded).
         """
-        q = ("SELECT openalex_id, doi, arm, meta_json, attempts FROM papers "
-             "WHERE stage = ? AND status IN ('pending','failed') AND attempts < ?")
+        q = (
+            "SELECT openalex_id, doi, arm, meta_json, attempts FROM papers "
+            "WHERE stage = ? AND status IN ('pending','failed') AND attempts < ?"
+        )
         args: list = [stage, MAX_ATTEMPTS]
         if arm:
-            q += " AND arm = ?"; args.append(arm)
+            q += " AND arm = ?"
+            args.append(arm)
         if year_min is not None:
-            q += " AND (year IS NULL OR year >= ?)"; args.append(int(year_min))
+            q += " AND (year IS NULL OR year >= ?)"
+            args.append(int(year_min))
         if publisher_doi_only:
             for pfx in PREPRINT_DOI_PREFIXES:
                 q += " AND (doi IS NULL OR doi = '' OR doi NOT LIKE ?)"
                 args.append(pfx + "%")
             for pfx in PREPRINT_VENUE_PREFIXES:
-                q += (" AND (json_extract(meta_json, '$.venue') IS NULL "
-                      "OR json_extract(meta_json, '$.venue') NOT LIKE ?)")
+                q += (
+                    " AND (json_extract(meta_json, '$.venue') IS NULL "
+                    "OR json_extract(meta_json, '$.venue') NOT LIKE ?)"
+                )
                 args.append(pfx + "%")
             for sub in PREPRINT_VENUE_SUBSTRINGS:
-                q += (" AND (json_extract(meta_json, '$.venue') IS NULL "
-                      "OR json_extract(meta_json, '$.venue') NOT GLOB ?)")
+                q += (
+                    " AND (json_extract(meta_json, '$.venue') IS NULL "
+                    "OR json_extract(meta_json, '$.venue') NOT GLOB ?)"
+                )
                 args.append("*" + sub + "*")
         if skip_coded_dois:
-            q += (" AND (doi IS NULL OR doi = '' OR doi NOT IN "
-                  "(SELECT doi FROM papers WHERE stage='verified' AND status='done' "
-                  "AND doi IS NOT NULL AND doi != ''))")
+            q += (
+                " AND (doi IS NULL OR doi = '' OR doi NOT IN "
+                "(SELECT doi FROM papers WHERE stage='verified' AND status='done' "
+                "AND doi IS NOT NULL AND doi != ''))"
+            )
         order = "year IS NULL ASC, year DESC, " if newest_first else ""
         q += f" ORDER BY {order}attempts ASC, openalex_id ASC LIMIT {int(limit)}"
         with self._conn() as c:
@@ -445,72 +663,153 @@ class Store:
             return out
 
     def advance(self, openalex_id: str, stage: str, meta: dict | None = None) -> None:
+        """Move a paper to a stage and mark it pending there.
+
+        Args:
+            openalex_id: The paper to move.
+            stage: The stage it has reached.
+            meta: The paper's metadata to store, replacing what is there. None
+                leaves the stored metadata as it is.
+        """
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         with self._conn() as c:
             if meta is None:
-                c.execute("UPDATE papers SET stage=?, status='pending', "
-                          "last_error=NULL, updated_at=? WHERE openalex_id=?",
-                          (stage, now, openalex_id))
+                c.execute(
+                    "UPDATE papers SET stage=?, status='pending', "
+                    "last_error=NULL, updated_at=? WHERE openalex_id=?",
+                    (stage, now, openalex_id),
+                )
             else:
                 y = meta.get("year")
-                c.execute("UPDATE papers SET stage=?, status='pending', meta_json=?, "
-                          "year=COALESCE(?, year), last_error=NULL, updated_at=? "
-                          "WHERE openalex_id=?",
-                          (stage, json.dumps(meta), int(y) if isinstance(y, int) else None,
-                           now, openalex_id))
+                c.execute(
+                    "UPDATE papers SET stage=?, status='pending', meta_json=?, "
+                    "year=COALESCE(?, year), last_error=NULL, updated_at=? "
+                    "WHERE openalex_id=?",
+                    (
+                        stage,
+                        json.dumps(meta),
+                        int(y) if isinstance(y, int) else None,
+                        now,
+                        openalex_id,
+                    ),
+                )
 
     def stage_counts(self) -> dict[str, int]:
+        """Count papers by stage and status.
+
+        Returns:
+            The number of papers under each `"<stage>/<status>"` key.
+        """
         with self._conn() as c:
-            return {f"{r['stage']}/{r['status']}": r["n"] for r in c.execute(
-                "SELECT stage, status, COUNT(*) AS n FROM papers "
-                "GROUP BY stage, status ORDER BY stage")}
+            return {
+                f"{r['stage']}/{r['status']}": r["n"]
+                for r in c.execute(
+                    "SELECT stage, status, COUNT(*) AS n FROM papers "
+                    "GROUP BY stage, status ORDER BY stage"
+                )
+            }
 
     # -- batch bookkeeping --------------------------------------------------
-    def record_batch(self, *, batch_id: str, model: str, n: int,
-                     members: list[tuple[str, dict]]) -> None:
+    def record_batch(
+        self, *, batch_id: str, model: str, n: int, members: list[tuple[str, dict]]
+    ) -> None:
+        """Record a submitted batch and move its papers to `classify_queued`.
+
+        Args:
+            batch_id: The id the Message Batches API gave the batch.
+            model: The model the batch's requests use.
+            n: The number of requests in the batch.
+            members: The requests as `(custom_id, meta)` pairs; each `meta` holds
+                the paper's `openalex_id`.
+        """
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         with self._conn() as c:
             c.execute("BEGIN")
-            c.execute("INSERT OR REPLACE INTO batches VALUES (?,?,?,'open',?)",
-                      (batch_id, model, n, now))
+            c.execute(
+                "INSERT OR REPLACE INTO batches VALUES (?,?,?,'open',?)", (batch_id, model, n, now)
+            )
             c.executemany(
                 "INSERT OR REPLACE INTO batch_members VALUES (?,?,?,?)",
-                [(batch_id, cid, meta["openalex_id"], json.dumps(meta))
-                 for cid, meta in members])
+                [(batch_id, cid, meta["openalex_id"], json.dumps(meta)) for cid, meta in members],
+            )
             c.executemany(
                 "UPDATE papers SET stage='classify_queued', batch_id=?, updated_at=? "
                 "WHERE openalex_id=?",
-                [(batch_id, now, meta["openalex_id"]) for _, meta in members])
+                [(batch_id, now, meta["openalex_id"]) for _, meta in members],
+            )
             c.execute("COMMIT")
 
     def open_batches(self) -> list[str]:
+        """List the batches whose results have not been collected.
+
+        Returns:
+            The ids of the open batches, oldest first.
+        """
         with self._conn() as c:
-            return [r["batch_id"] for r in c.execute(
-                "SELECT batch_id FROM batches WHERE status='open' ORDER BY created_at")]
+            return [
+                r["batch_id"]
+                for r in c.execute(
+                    "SELECT batch_id FROM batches WHERE status='open' ORDER BY created_at"
+                )
+            ]
 
     def batch_members(self, batch_id: str) -> dict[str, dict]:
+        """Look up the papers of a batch.
+
+        Args:
+            batch_id: The batch to look up.
+
+        Returns:
+            The spooled metadata of each request, by `custom_id`.
+        """
         with self._conn() as c:
-            return {r["custom_id"]: json.loads(r["meta_json"]) for r in c.execute(
-                "SELECT custom_id, meta_json FROM batch_members WHERE batch_id=?",
-                (batch_id,))}
+            return {
+                r["custom_id"]: json.loads(r["meta_json"])
+                for r in c.execute(
+                    "SELECT custom_id, meta_json FROM batch_members WHERE batch_id=?", (batch_id,)
+                )
+            }
 
     def batch_model(self, batch_id: str) -> str:
+        """Look up the model a batch was submitted with.
+
+        Args:
+            batch_id: The batch to look up.
+
+        Returns:
+            The model id, or an empty string if the batch is not recorded.
+        """
         with self._conn() as c:
-            r = c.execute("SELECT model FROM batches WHERE batch_id=?",
-                          (batch_id,)).fetchone()
+            r = c.execute("SELECT model FROM batches WHERE batch_id=?", (batch_id,)).fetchone()
             return r["model"] if r else ""
 
     def close_batch(self, batch_id: str) -> None:
+        """Mark a batch as collected.
+
+        Args:
+            batch_id: The batch to close.
+        """
         with self._conn() as c:
             c.execute("UPDATE batches SET status='closed' WHERE batch_id=?", (batch_id,))
 
     def paper_meta(self, openalex_id: str) -> dict:
-        """Full stored metadata for one paper, passages included. The batch spool
-        keeps only a slim copy (no passages, no DAS text), so anything that must
-        check a result against what the model was shown reads it from here."""
+        """Read the full stored metadata of one paper, passages included.
+
+        The batch spool keeps only a slim copy (no passages, no DAS text), so
+        anything that must check a result against what the model was shown reads
+        it from here.
+
+        Args:
+            openalex_id: The paper to read.
+
+        Returns:
+            The stored metadata, or an empty dict if the paper is not enrolled or
+            has none.
+        """
         with self._conn() as c:
-            r = c.execute("SELECT meta_json FROM papers WHERE openalex_id=?",
-                          (openalex_id,)).fetchone()
+            r = c.execute(
+                "SELECT meta_json FROM papers WHERE openalex_id=?", (openalex_id,)
+            ).fetchone()
         return json.loads(r["meta_json"]) if r and r["meta_json"] else {}
 
     def record_preprint_das(self, openalex_id: str, result: dict) -> str:
@@ -520,29 +819,51 @@ class Store:
         than in them: the codes describe the version of record. It lives in
         `meta_json` under a key that `requeue_for_recode` does not strip, so it
         survives the recode that brings in the published text.
+
+        Args:
+            openalex_id: The paper the preprint belongs to.
+            result: The finding to store under the `preprint_das` key.
+
+        Returns:
+            An empty string on success, or `"not enrolled"`.
         """
         with self._conn() as c:
             c.execute("BEGIN")
-            r = c.execute("SELECT meta_json FROM papers WHERE openalex_id=?",
-                          (openalex_id,)).fetchone()
+            r = c.execute(
+                "SELECT meta_json FROM papers WHERE openalex_id=?", (openalex_id,)
+            ).fetchone()
             if r is None:
                 c.execute("ROLLBACK")
                 return "not enrolled"
             meta = json.loads(r["meta_json"] or "{}")
             meta["preprint_das"] = result
-            c.execute("UPDATE papers SET meta_json=? WHERE openalex_id=?",
-                      (json.dumps(meta), openalex_id))
+            c.execute(
+                "UPDATE papers SET meta_json=? WHERE openalex_id=?", (json.dumps(meta), openalex_id)
+            )
             c.execute("COMMIT")
         return ""
 
     def is_classified(self, openalex_id: str) -> bool:
+        """Tell whether a paper has reached the classified stage or beyond.
+
+        Args:
+            openalex_id: The paper to check.
+
+        Returns:
+            True if the paper is at `classified`, `verified` or `done`.
+        """
         with self._conn() as c:
-            r = c.execute("SELECT stage FROM papers WHERE openalex_id=?",
-                          (openalex_id,)).fetchone()
+            r = c.execute("SELECT stage FROM papers WHERE openalex_id=?", (openalex_id,)).fetchone()
             return bool(r) and r["stage"] in ("classified", "verified", "done")
 
-    def save_classified(self, rec, *, batch_id: str = "") -> None:
-        """Store a classified record and advance it to the verify stage."""
+    def save_classified(self, rec: PaperRecord, *, batch_id: str = "") -> None:
+        """Store a classified record and advance it to the verify stage.
+
+        Args:
+            rec: The validated record.
+            batch_id: The batch the record came from; empty for the synchronous
+                and manual paths.
+        """
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         with self._conn() as c:
             c.execute("BEGIN")
@@ -550,36 +871,66 @@ class Store:
                 "UPDATE papers SET stage='classified', status='pending', "
                 "scheme_version=?, arm=?, record_json=?, batch_id=?, "
                 "last_error=NULL, updated_at=? WHERE openalex_id=?",
-                (rec.scheme_version, rec.arm.value, json.dumps(rec.flat()),
-                 batch_id, now, rec.openalex_id))
+                (
+                    rec.scheme_version,
+                    rec.arm.value,
+                    json.dumps(rec.flat()),
+                    batch_id,
+                    now,
+                    rec.openalex_id,
+                ),
+            )
             c.execute("DELETE FROM evidence WHERE openalex_id=?", (rec.openalex_id,))
             c.executemany(
                 "INSERT INTO evidence VALUES (?,?,?,?,?,?)",
-                [(rec.openalex_id, e.id, e.quote, e.section, e.locator, e.source)
-                 for e in rec.evidence])
+                [
+                    (rec.openalex_id, e.id, e.quote, e.section, e.locator, e.source)
+                    for e in rec.evidence
+                ],
+            )
             c.execute("COMMIT")
 
     def requeue_for_sync(self, openalex_id: str, *, reason: str) -> None:
-        """A batch result that failed schema validation. There is no
-        conversation to continue in a batch, so it goes back to the synchronous
-        path where the validator's complaint can be handed to the model."""
+        """Send a batch result that failed schema validation to the synchronous path.
+
+        There is no conversation to continue in a batch, so the paper goes back
+        to the synchronous path, where the validator's complaint can be handed to
+        the model.
+
+        Args:
+            openalex_id: The paper to send back.
+            reason: The validator's complaint, recorded in `failures`.
+        """
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         with self._conn() as c:
             c.execute("BEGIN")
-            c.execute("INSERT INTO failures (openalex_id, stage, error_type, message, at) "
-                      "VALUES (?,?,?,?,?)",
-                      (openalex_id, "classify_batch", "SchemaError", reason, now))
-            c.execute("UPDATE papers SET stage='retrieved', status='pending', "
-                      "attempts=attempts+1, last_error='batch schema failure', "
-                      "updated_at=? WHERE openalex_id=?", (now, openalex_id))
+            c.execute(
+                "INSERT INTO failures (openalex_id, stage, error_type, message, at) "
+                "VALUES (?,?,?,?,?)",
+                (openalex_id, "classify_batch", "SchemaError", reason, now),
+            )
+            c.execute(
+                "UPDATE papers SET stage='retrieved', status='pending', "
+                "attempts=attempts+1, last_error='batch schema failure', "
+                "updated_at=? WHERE openalex_id=?",
+                (now, openalex_id),
+            )
             c.execute("COMMIT")
 
     #: What `stage_retrieve_one` adds on top of the metadata facts. Requeueing
     #: strips exactly these, so the re-run starts from metadata rather than from
     #: a stale retrieval.
-    RETRIEVAL_KEYS = ("passages", "retrieval", "text_source", "text_url",
-                      "text_complete", "pdf_parser", "retrieval_attempts",
-                      "passages_are_structural", "structural_context")
+    RETRIEVAL_KEYS = (
+        "passages",
+        "retrieval",
+        "text_source",
+        "text_url",
+        "text_complete",
+        "pdf_parser",
+        "retrieval_attempts",
+        "passages_are_structural",
+        "structural_context",
+    )
 
     def requeue_for_retrieval(self, openalex_id: str, *, reason: str) -> str:
         """Send a retrieved, not-yet-classified paper back through retrieval.
@@ -590,28 +941,43 @@ class Store:
         classification is refused: its codes were judged against the text it
         has, and swapping that text underneath them would detach the codes from
         their evidence. The requeue is logged to `failures` as an audit trail.
+
+        Args:
+            openalex_id: The paper to send back.
+            reason: Why the stored text is wrong; recorded in `failures`.
+
+        Returns:
+            An empty string on success, otherwise why the requeue was refused.
         """
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         with self._conn() as c:
             c.execute("BEGIN")
-            r = c.execute("SELECT stage, meta_json FROM papers WHERE openalex_id=?",
-                          (openalex_id,)).fetchone()
-            why = ("not enrolled" if r is None else
-                   "" if r["stage"] == "retrieved" else
-                   f"at stage {r['stage']}; only retrieved, unclassified papers "
-                   f"can be requeued")
+            r = c.execute(
+                "SELECT stage, meta_json FROM papers WHERE openalex_id=?", (openalex_id,)
+            ).fetchone()
+            why = (
+                "not enrolled"
+                if r is None
+                else ""
+                if r["stage"] == "retrieved"
+                else f"at stage {r['stage']}; only retrieved, unclassified papers can be requeued"
+            )
             if why:
                 c.execute("ROLLBACK")
                 return why
             meta = json.loads(r["meta_json"] or "{}")
             for k in self.RETRIEVAL_KEYS:
                 meta.pop(k, None)
-            c.execute("INSERT INTO failures (openalex_id, stage, error_type, message, at) "
-                      "VALUES (?,?,?,?,?)",
-                      (openalex_id, "retrieve", "requeued", reason[:2000], now))
-            c.execute("UPDATE papers SET stage='metadata', status='pending', meta_json=?, "
-                      "last_error='retrieve:requeued', updated_at=? WHERE openalex_id=?",
-                      (json.dumps(meta), now, openalex_id))
+            c.execute(
+                "INSERT INTO failures (openalex_id, stage, error_type, message, at) "
+                "VALUES (?,?,?,?,?)",
+                (openalex_id, "retrieve", "requeued", reason[:2000], now),
+            )
+            c.execute(
+                "UPDATE papers SET stage='metadata', status='pending', meta_json=?, "
+                "last_error='retrieve:requeued', updated_at=? WHERE openalex_id=?",
+                (json.dumps(meta), now, openalex_id),
+            )
             c.execute("COMMIT")
         return ""
 
@@ -627,28 +993,50 @@ class Store:
         so the stored text and metadata are untouched.
 
         Returns "" on success, otherwise why it was refused.
+
+        Args:
+            openalex_id: The paper to give another try.
+            reason: Why the attempts are cleared; recorded in `failures`.
+
+        Returns:
+            An empty string on success, otherwise why it was refused.
         """
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         with self._conn() as c:
             c.execute("BEGIN")
-            r = c.execute("SELECT status, attempts, record_json FROM papers "
-                          "WHERE openalex_id=?", (openalex_id,)).fetchone()
-            why = ("not enrolled" if r is None else
-                   f"status is {r['status']}, not failed; nothing to retry"
-                   if r is not None and r["status"] != "failed" else
-                   "already carries a classification; use requeue or recode"
-                   if r is not None and r["record_json"] else "")
+            r = c.execute(
+                "SELECT status, attempts, record_json FROM papers WHERE openalex_id=?",
+                (openalex_id,),
+            ).fetchone()
+            why = (
+                "not enrolled"
+                if r is None
+                else f"status is {r['status']}, not failed; nothing to retry"
+                if r is not None and r["status"] != "failed"
+                else "already carries a classification; use requeue or recode"
+                if r is not None and r["record_json"]
+                else ""
+            )
             if why:
                 c.execute("ROLLBACK")
                 return why
-            c.execute("INSERT INTO failures (openalex_id, stage, error_type, message, at) "
-                      "VALUES ((SELECT openalex_id FROM papers WHERE openalex_id=?), "
-                      "(SELECT stage FROM papers WHERE openalex_id=?), ?, ?, ?)",
-                      (openalex_id, openalex_id, "attempts_cleared",
-                       f"attempts {r['attempts']} -> 0: {reason}"[:2000], now))
-            c.execute("UPDATE papers SET status='pending', attempts=0, "
-                      "last_error=NULL, updated_at=? WHERE openalex_id=?",
-                      (now, openalex_id))
+            c.execute(
+                "INSERT INTO failures (openalex_id, stage, error_type, message, at) "
+                "VALUES ((SELECT openalex_id FROM papers WHERE openalex_id=?), "
+                "(SELECT stage FROM papers WHERE openalex_id=?), ?, ?, ?)",
+                (
+                    openalex_id,
+                    openalex_id,
+                    "attempts_cleared",
+                    f"attempts {r['attempts']} -> 0: {reason}"[:2000],
+                    now,
+                ),
+            )
+            c.execute(
+                "UPDATE papers SET status='pending', attempts=0, "
+                "last_error=NULL, updated_at=? WHERE openalex_id=?",
+                (now, openalex_id),
+            )
             c.execute("COMMIT")
         return ""
 
@@ -670,12 +1058,21 @@ class Store:
         coder's is how a two-coder study loses the thing it is measuring — use
         `requeue_for_recode` and its audit trail for that. Returns "" on
         success, else the refusal.
+
+        Args:
+            openalex_id: The paper to send back to the classifier.
+            reason: Why it is reclassified; recorded in `failures` with the stub
+                that is discarded.
+
+        Returns:
+            An empty string on success, otherwise why it was refused.
         """
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         with self._conn() as c:
             c.execute("BEGIN")
-            r = c.execute("SELECT meta_json, record_json FROM papers WHERE openalex_id=?",
-                          (openalex_id,)).fetchone()
+            r = c.execute(
+                "SELECT meta_json, record_json FROM papers WHERE openalex_id=?", (openalex_id,)
+            ).fetchone()
             if r is None:
                 c.execute("ROLLBACK")
                 return "not enrolled"
@@ -694,21 +1091,33 @@ class Store:
             # nothing was stored. Those need re-retrieval, not reclassification,
             # and admitting them here only burns a claim and re-stubs them.
             from .classify import has_classifiable_evidence
+
             if not has_classifiable_evidence(
-                    crossref_summary={k: meta.get(k) or [] for k in
-                                      ("das_texts", "dataset_ids", "confirmed_datasets")},
-                    passages=meta.get("passages") or []):
+                crossref_summary={
+                    k: meta.get(k) or [] for k in ("das_texts", "dataset_ids", "confirmed_datasets")
+                },
+                passages=meta.get("passages") or [],
+            ):
                 c.execute("ROLLBACK")
                 return "no stored evidence to classify from; use recode to re-retrieve"
-            c.execute("INSERT INTO failures (openalex_id, stage, error_type, message, at) "
-                      "VALUES (?,?,?,?,?)",
-                      (openalex_id, "classify", "reclassify",
-                       (reason[:1000] + " || discarded stub: " + (r["record_json"] or ""))[:8000],
-                       now))
+            c.execute(
+                "INSERT INTO failures (openalex_id, stage, error_type, message, at) "
+                "VALUES (?,?,?,?,?)",
+                (
+                    openalex_id,
+                    "classify",
+                    "reclassify",
+                    (reason[:1000] + " || discarded stub: " + (r["record_json"] or ""))[:8000],
+                    now,
+                ),
+            )
             c.execute("DELETE FROM evidence WHERE openalex_id=?", (openalex_id,))
-            c.execute("UPDATE papers SET stage='retrieved', status='pending', attempts=0, "
-                      "record_json=NULL, batch_id=NULL, last_error='classify:reclassify', "
-                      "updated_at=? WHERE openalex_id=?", (now, openalex_id))
+            c.execute(
+                "UPDATE papers SET stage='retrieved', status='pending', attempts=0, "
+                "record_json=NULL, batch_id=NULL, last_error='classify:reclassify', "
+                "updated_at=? WHERE openalex_id=?",
+                (now, openalex_id),
+            )
             c.execute("COMMIT")
         return ""
 
@@ -730,13 +1139,22 @@ class Store:
         Deliberately not reversible in place: the previous record is written to
         `failures` before it is cleared, so the audit trail holds what was
         discarded and why.
+
+        Args:
+            openalex_id: The paper to start over.
+            reason: Why its text and codes are discarded; recorded in `failures`
+                with the record that is discarded.
+
+        Returns:
+            An empty string on success, otherwise why it was refused.
         """
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         with self._conn() as c:
             c.execute("BEGIN")
-            r = c.execute("SELECT stage, status, meta_json, record_json "
-                          "FROM papers WHERE openalex_id=?",
-                          (openalex_id,)).fetchone()
+            r = c.execute(
+                "SELECT stage, status, meta_json, record_json FROM papers WHERE openalex_id=?",
+                (openalex_id,),
+            ).fetchone()
             if r is None:
                 c.execute("ROLLBACK")
                 return "not enrolled"
@@ -746,16 +1164,25 @@ class Store:
             meta.pop("passages_are_structural", None)
             meta.pop("structural_context", None)
             prior = r["record_json"] or ""
-            c.execute("INSERT INTO failures (openalex_id, stage, error_type, message, at) "
-                      "VALUES (?,?,?,?,?)",
-                      (openalex_id, "classify", "recoded",
-                       (reason[:1000] + " || discarded record: " + prior)[:8000], now))
+            c.execute(
+                "INSERT INTO failures (openalex_id, stage, error_type, message, at) "
+                "VALUES (?,?,?,?,?)",
+                (
+                    openalex_id,
+                    "classify",
+                    "recoded",
+                    (reason[:1000] + " || discarded record: " + prior)[:8000],
+                    now,
+                ),
+            )
             c.execute("DELETE FROM evidence WHERE openalex_id=?", (openalex_id,))
-            c.execute("UPDATE papers SET stage='metadata', status='pending', "
-                      "attempts=0, record_json=NULL, meta_json=?, batch_id=NULL, "
-                      "last_error='classify:recoded', updated_at=? "
-                      "WHERE openalex_id=?",
-                      (json.dumps(meta), now, openalex_id))
+            c.execute(
+                "UPDATE papers SET stage='metadata', status='pending', "
+                "attempts=0, record_json=NULL, meta_json=?, batch_id=NULL, "
+                "last_error='classify:recoded', updated_at=? "
+                "WHERE openalex_id=?",
+                (json.dumps(meta), now, openalex_id),
+            )
             c.execute("COMMIT")
         return ""
 
@@ -778,27 +1205,47 @@ class Store:
         The record, evidence and verifications are kept as they are, so an
         exclusion is reversible and nothing about the paper is lost. The reason
         goes to `failures`. Returns "" on success, else the refusal.
+
+        Args:
+            openalex_id: The paper to remove.
+            reason: Why it is removed; recorded in `failures`.
+            as_status: The status to give it: `"excluded"` or `"outdated"`.
+
+        Returns:
+            An empty string on success, otherwise why it was refused.
+
+        Raises:
+            ValueError: If `as_status` is not one of `REMOVED`.
         """
         if as_status not in self.REMOVED:
             raise ValueError(f"as_status must be one of {self.REMOVED}, not {as_status!r}")
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         with self._conn() as c:
             c.execute("BEGIN")
-            r = c.execute("SELECT stage, status FROM papers WHERE openalex_id=?",
-                          (openalex_id,)).fetchone()
+            r = c.execute(
+                "SELECT stage, status FROM papers WHERE openalex_id=?", (openalex_id,)
+            ).fetchone()
             if r is None:
                 c.execute("ROLLBACK")
                 return "not enrolled"
             if r["status"] in self.REMOVED:
                 c.execute("ROLLBACK")
                 return f"already {r['status']}"
-            c.execute("INSERT INTO failures (openalex_id, stage, error_type, message, at) "
-                      "VALUES (?,?,?,?,?)",
-                      (openalex_id, r["stage"], as_status,
-                       f"{reason[:1000]} || was {r['stage']}/{r['status']}", now))
-            c.execute("UPDATE papers SET status=?, last_error=?, updated_at=? "
-                      "WHERE openalex_id=?",
-                      (as_status, f"{as_status}:{reason[:200]}", now, openalex_id))
+            c.execute(
+                "INSERT INTO failures (openalex_id, stage, error_type, message, at) "
+                "VALUES (?,?,?,?,?)",
+                (
+                    openalex_id,
+                    r["stage"],
+                    as_status,
+                    f"{reason[:1000]} || was {r['stage']}/{r['status']}",
+                    now,
+                ),
+            )
+            c.execute(
+                "UPDATE papers SET status=?, last_error=?, updated_at=? WHERE openalex_id=?",
+                (as_status, f"{as_status}:{reason[:200]}", now, openalex_id),
+            )
             c.execute("COMMIT")
         return ""
 
@@ -816,29 +1263,58 @@ class Store:
         `reverify` sends the paper back to the verify stage — required whenever
         an identifier changed, because `Actual` is written only by verify.py.
         Returns "" on success, else the refusal.
+
+        Args:
+            rec: The adjudicated record. It is validated before anything is
+                written, so `SchemaError` propagates from an invalid one.
+            reason: Why the codes are replaced; recorded in `failures` with the
+                record that is replaced.
+            reverify: Whether to send the paper back to the verify stage.
+
+        Returns:
+            An empty string on success, otherwise why it was refused.
         """
         rec.validate()
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         with self._conn() as c:
             c.execute("BEGIN")
-            r = c.execute("SELECT status, stage, record_json FROM papers WHERE openalex_id=?",
-                          (rec.openalex_id,)).fetchone()
-            why = ("not enrolled" if r is None else
-                   "" if r["status"] == "done" and r["record_json"] else
-                   f"at {r['stage']}/{r['status']}; only finished papers can be adjudicated")
+            r = c.execute(
+                "SELECT status, stage, record_json FROM papers WHERE openalex_id=?",
+                (rec.openalex_id,),
+            ).fetchone()
+            why = (
+                "not enrolled"
+                if r is None
+                else ""
+                if r["status"] == "done" and r["record_json"]
+                else f"at {r['stage']}/{r['status']}; only finished papers can be adjudicated"
+            )
             if why:
                 c.execute("ROLLBACK")
                 return why
-            c.execute("INSERT INTO failures (openalex_id, stage, error_type, message, at) "
-                      "VALUES (?,?,?,?,?)",
-                      (rec.openalex_id, r["stage"], "adjudicated",
-                       (reason[:1000] + " || replaced record: " + r["record_json"])[:8000], now))
-            c.execute("UPDATE papers SET record_json=?, scheme_version=?, stage=?, status=?, "
-                      "last_error=NULL, updated_at=? WHERE openalex_id=?",
-                      (json.dumps(rec.flat()), rec.scheme_version,
-                       "classified" if reverify else r["stage"],
-                       "pending" if reverify else r["status"],
-                       now, rec.openalex_id))
+            c.execute(
+                "INSERT INTO failures (openalex_id, stage, error_type, message, at) "
+                "VALUES (?,?,?,?,?)",
+                (
+                    rec.openalex_id,
+                    r["stage"],
+                    "adjudicated",
+                    (reason[:1000] + " || replaced record: " + r["record_json"])[:8000],
+                    now,
+                ),
+            )
+            c.execute(
+                "UPDATE papers SET record_json=?, scheme_version=?, stage=?, status=?, "
+                "last_error=NULL, updated_at=? WHERE openalex_id=?",
+                (
+                    json.dumps(rec.flat()),
+                    rec.scheme_version,
+                    "classified" if reverify else r["stage"],
+                    "pending" if reverify else r["status"],
+                    now,
+                    rec.openalex_id,
+                ),
+            )
             c.execute("COMMIT")
         return ""
 
@@ -859,65 +1335,118 @@ class Store:
         is refused too, since pooling versions is what `export_csv` guards
         against. The adoption and its source go to `failures`. Returns "" on
         success, else the refusal.
+
+        Args:
+            src_path: The database to copy the paper from.
+            openalex_id: The paper to copy.
+            reason: Why it is adopted; recorded in `failures` with its source.
+
+        Returns:
+            An empty string on success, otherwise why it was refused.
         """
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         src = sqlite3.connect(str(src_path), timeout=60)
         src.row_factory = sqlite3.Row
         try:
-            row = src.execute("SELECT * FROM papers WHERE openalex_id=?",
-                              (openalex_id,)).fetchone()
+            row = src.execute("SELECT * FROM papers WHERE openalex_id=?", (openalex_id,)).fetchone()
             if row is None:
                 return f"not in {src_path}"
             if row["record_json"] and row["scheme_version"] not in (None, SCHEME_VERSION):
-                return (f"coded under scheme {row['scheme_version']}, "
-                        f"not {SCHEME_VERSION}")
-            children = {t: [dict(r) for r in src.execute(
-                f"SELECT * FROM {t} WHERE openalex_id=?", (openalex_id,))]
-                for t in self._PAPER_TABLES}
+                return f"coded under scheme {row['scheme_version']}, not {SCHEME_VERSION}"
+            children = {
+                t: [
+                    dict(r)
+                    for r in src.execute(f"SELECT * FROM {t} WHERE openalex_id=?", (openalex_id,))
+                ]
+                for t in self._PAPER_TABLES
+            }
         finally:
             src.close()
 
         with self._conn() as c:
             c.execute("BEGIN")
-            if c.execute("SELECT 1 FROM papers WHERE openalex_id=?",
-                         (openalex_id,)).fetchone():
+            if c.execute("SELECT 1 FROM papers WHERE openalex_id=?", (openalex_id,)).fetchone():
                 c.execute("ROLLBACK")
                 return "already enrolled here"
-            cols = [k for k in row.keys()
-                    if k in {r["name"] for r in c.execute("PRAGMA table_info(papers)")}]
-            c.execute(f"INSERT INTO papers ({', '.join(cols)}) "
-                      f"VALUES ({', '.join('?' * len(cols))})", [row[k] for k in cols])
+            cols = [
+                k
+                for k in row.keys()
+                if k in {r["name"] for r in c.execute("PRAGMA table_info(papers)")}
+            ]
+            c.execute(
+                f"INSERT INTO papers ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
+                [row[k] for k in cols],
+            )
             for table, rows in children.items():
                 for r in rows:
-                    r.pop("id", None)            # autoincrement keys are local
-                    c.execute(f"INSERT OR IGNORE INTO {table} ({', '.join(r)}) "
-                              f"VALUES ({', '.join('?' * len(r))})", list(r.values()))
-            c.execute("INSERT INTO failures (openalex_id, stage, error_type, message, at) "
-                      "VALUES (?,?,?,?,?)",
-                      (openalex_id, row["stage"], "adopted",
-                       f"{reason[:1000]} || from {src_path} as "
-                       f"{row['stage']}/{row['status']}", now))
+                    r.pop("id", None)  # autoincrement keys are local
+                    c.execute(
+                        f"INSERT OR IGNORE INTO {table} ({', '.join(r)}) "
+                        f"VALUES ({', '.join('?' * len(r))})",
+                        list(r.values()),
+                    )
+            c.execute(
+                "INSERT INTO failures (openalex_id, stage, error_type, message, at) "
+                "VALUES (?,?,?,?,?)",
+                (
+                    openalex_id,
+                    row["stage"],
+                    "adopted",
+                    f"{reason[:1000]} || from {src_path} as {row['stage']}/{row['status']}",
+                    now,
+                ),
+            )
             c.execute("COMMIT")
         return ""
 
     def counts(self) -> dict[str, int]:
+        """Count papers by status.
+
+        Returns:
+            The number of papers under each status.
+        """
         with self._conn() as c:
-            return {r["status"]: r["n"] for r in c.execute(
-                "SELECT status, COUNT(*) AS n FROM papers GROUP BY status")}
+            return {
+                r["status"]: r["n"]
+                for r in c.execute("SELECT status, COUNT(*) AS n FROM papers GROUP BY status")
+            }
 
     # -- export ------------------------------------------------------------
-    def export_csv(self, analysis_path: str | Path,
-                   evidence_path: str | Path | None = None,
-                   review_path: str | Path | None = None) -> dict[str, int]:
-        """Write the analysis view. Rows whose scheme_versions differ in major
-        or minor refuse to export together — the vocabulary differs, and
-        pooling them is exactly the silent corruption we are guarding against.
-        A patch difference (2.0.0 beside 2.0.1) pools: a patch records a ruling
-        on how the same tokens are applied, and the scheme_version column keeps
-        every row traceable to the ruling it was coded or recoded under."""
+    def export_csv(
+        self,
+        analysis_path: str | Path,
+        evidence_path: str | Path | None = None,
+        review_path: str | Path | None = None,
+    ) -> dict[str, int]:
+        """Write the analysis view of the finished papers.
+
+        Rows whose scheme versions differ in major or minor refuse to export
+        together: the vocabulary differs, and pooling them is exactly the silent
+        corruption we are guarding against. A patch difference (2.0.0 beside
+        2.0.1) pools: a patch records a ruling on how the same tokens are
+        applied, and the scheme_version column keeps every row traceable to the
+        ruling it was coded or recoded under.
+
+        Args:
+            analysis_path: Where to write one row per finished paper, with the
+                columns of `FLAT_COLUMNS`.
+            evidence_path: Where to write every evidence quote, or None to skip.
+            review_path: Where to write the papers flagged for human review, or
+                None to skip.
+
+        Returns:
+            The number of rows written to each file, under the keys `analysis`,
+            `evidence` and `review_queue` (the last two only when written).
+
+        Raises:
+            RuntimeError: If the finished rows span scheme versions that differ
+                in more than the patch number.
+        """
         with self._conn() as c:
-            versions = [r[0] for r in c.execute(
-                "SELECT DISTINCT scheme_version FROM papers WHERE status='done'")]
+            versions = [
+                r[0]
+                for r in c.execute("SELECT DISTINCT scheme_version FROM papers WHERE status='done'")
+            ]
             families = {_scheme_family(v) for v in versions}
             if len(families) > 1:
                 raise RuntimeError(
@@ -925,9 +1454,12 @@ class Store:
                     f"{sorted(versions, key=str)}, which differ in more than the patch "
                     f"number. Migrate them to {SCHEME_VERSION} first."
                 )
-            rows = [json.loads(r["record_json"]) for r in c.execute(
-                "SELECT record_json FROM papers WHERE status='done' "
-                "AND record_json IS NOT NULL")]
+            rows = [
+                json.loads(r["record_json"])
+                for r in c.execute(
+                    "SELECT record_json FROM papers WHERE status='done' AND record_json IS NOT NULL"
+                )
+            ]
 
         Path(analysis_path).parent.mkdir(parents=True, exist_ok=True)
         with open(analysis_path, "w", newline="", encoding="utf-8") as f:
@@ -937,14 +1469,21 @@ class Store:
         out = {"analysis": len(rows)}
 
         if evidence_path:
-            with self._conn() as c, open(evidence_path, "w", newline="",
-                                         encoding="utf-8") as f:
+            with self._conn() as c, open(evidence_path, "w", newline="", encoding="utf-8") as f:
                 w = csv.writer(f)
                 w.writerow(["openalex_id", "ev_id", "quote", "section", "locator", "source"])
                 n = 0
                 for r in c.execute("SELECT * FROM evidence ORDER BY openalex_id, ev_id"):
-                    w.writerow([r["openalex_id"], r["ev_id"], r["quote"],
-                                r["section"], r["locator"], r["source"]])
+                    w.writerow(
+                        [
+                            r["openalex_id"],
+                            r["ev_id"],
+                            r["quote"],
+                            r["section"],
+                            r["locator"],
+                            r["source"],
+                        ]
+                    )
                     n += 1
                 out["evidence"] = n
 
